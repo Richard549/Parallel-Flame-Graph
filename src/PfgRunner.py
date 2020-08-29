@@ -10,7 +10,8 @@ from PfgUtil import initialise_logging, debug_mode, LogLevelOption
 def run_pfg(
 		tracefile,
 		transformation,
-		height_display_option
+		height_display_option,
+		output_file
 		):
 	
 	logging.info("Parsing the tracefile.")
@@ -52,9 +53,8 @@ def run_pfg(
 		min_timestamp,
 		max_timestamp,
 		cpus,
-		height_display_option)
-
-	# TODO save to file (SVG?)
+		height_display_option,
+		output_file)
 
 def transformation_option(input_string):
 	transform_option_int = 0
@@ -97,24 +97,26 @@ def parse_args():
 
 	optional.add_argument('-c', '--height_option', type=height_option, default=HeightDisplayOption.CONSTANT, help="Calculation method for the bar height when visualising the parallel stack trace. Options are:" + height_options_str + ".")
 	optional.add_argument('-t', '--transform', type=transformation_option, default=TransformationOption.NONE, help="Transformation applied to visualise the parallel stack trace. Options are:" + tf_options_str + ".")
+	optional.add_argument('-o', '--output', required=False, help="Output filename (if set, the PFG will be saved as .PNG).")
+
 	optional.add_argument('-l', '--logfile', default="log.txt", help="Filename to output log messages (defaults to log.txt).") 
 	optional.add_argument('-d', '--log_level', type=log_level_option, default=LogLevelOption.INFO, help="Logging level. Options are:" + ll_options_str + ".")
-	optional.add_argument('--tee', action='store_true', help="Boolean: include debug_mode and tracing log messages (default False).") 
+	optional.add_argument('--tee', action='store_true', help="Pipe logging messages to stdout as well as the log file.") 
 
 	parser._action_groups.append(optional)
 
 	args = parser.parse_args()
 
-	return args.tracefile, args.transform, args.logfile, args.log_level, args.tee, args.height_option
+	return args.tracefile, args.transform, args.logfile, args.log_level, args.tee, args.height_option, args.output
 
-tracefile, transformation_type, logfile, log_level, tee_mode, height_option = parse_args()
+tracefile, transformation_type, logfile, log_level, tee_mode, height_option, output_file = parse_args()
 initialise_logging(logfile, log_level, tee_mode)
 
 logging.info("Running Parallel Flame Graph for %s", tracefile)
 logging.info("Selected transformation option was %s.", transformation_type.name)
 logging.info("Selected height display option was %s.", height_option.name)
 
-run_pfg(tracefile, transformation_type, height_option)
+run_pfg(tracefile, transformation_type, height_option, output_file)
 
 logging.info("Done")
 

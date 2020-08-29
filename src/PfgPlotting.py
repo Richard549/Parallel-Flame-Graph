@@ -56,7 +56,7 @@ class PFGBarText:
 		self.ax = ax
 
 		# Calculate the per character width (in data-coords)
-		test_box = ax.text(5, 5, 'a', fontsize='x-small')
+		test_box = ax.text(5, 5, 'a', fontsize='small')
 		bbox = test_box.get_window_extent(renderer=ax.figure.canvas.get_renderer())
 		bbox = Bbox(ax.transData.inverted().transform(bbox))
 		self.per_char_data_width = bbox.width
@@ -75,7 +75,7 @@ class PFGBarText:
 		# determine the initial position of the text
 		x, y, processed_text = self.compute_text_position_info(ax, xlims, ylims, text)
 		
-		text_box = ax.text(x, y, processed_text, zorder=20, fontsize='x-small')
+		text_box = ax.text(x, y, processed_text, zorder=20, fontsize='small')
 
 		self.cid = ax.callbacks.connect('resize_event', self)
 		self.cid2 = ax.callbacks.connect('xlim_changed', self)
@@ -190,7 +190,7 @@ class PFGBarText:
 		# function is called on each scale change or window resized
 
 		# recalculate the width of each character in data coordinates
-		test_box = self.ax.text(5, 5, 'a', fontsize='x-small')
+		test_box = self.ax.text(5, 5, 'a', fontsize='small')
 		bbox = test_box.get_window_extent(renderer=self.ax.figure.canvas.get_renderer())
 		bbox = Bbox(self.ax.transData.inverted().transform(bbox))
 		self.per_char_data_width = bbox.width
@@ -325,7 +325,9 @@ def plot_pfg_tree(tree,
 		min_timestamp,
 		max_timestamp,
 		cpus,
-		height_option):
+		height_option,
+		output_file=None
+		):
 
 	if len(tree.root_nodes) == 0:
 		logging.warn("There are no root nodes in the tree.")
@@ -341,6 +343,7 @@ def plot_pfg_tree(tree,
 	random.shuffle(colour_values)
 
 	fig = plt.figure()
+	fig.set_size_inches(14, 8)
 	ax = fig.add_subplot(111)
 
 	top_level_width = 100.0
@@ -440,10 +443,21 @@ def plot_pfg_tree(tree,
 	hover_text = PFGHoverText(ax)
 
 	wallclock_duration = sizeof_fmt(max_timestamp - min_timestamp)
-	plt.title("OpenMP Parallel FlameGraph")
+	ax.set_title("OpenMP Parallel FlameGraph")
 
-	plt.xticks([0,top_level_width],(str(sizeof_fmt(0)), str(sizeof_fmt(max_timestamp - min_timestamp))))
+	ax.set_yticks([])
+	ax.set_xticks([0,top_level_width])
+	ax.set_xticklabels((str(sizeof_fmt(0)), str(sizeof_fmt(max_timestamp - min_timestamp))))
 
-	plt.show()
+	if output_file is None:
+		logging.info("Displaying interactive plot.")
+		plt.show()
+	else:
+		logging.info("Saving plot to %s.", output_file)
+		fig.savefig(output_file, format="png", dpi=400, bbox_inches="tight")
+
+
+
+
 
 
