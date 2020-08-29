@@ -183,9 +183,16 @@ class PFGTree:
 		self.gen_tree_process_entities_into_child_nodes(None, root_entities, self.root_nodes, 0)
 
 	"""
-		The basic tree has each node representing a set of entities, grouped by symbol and CPU, and which were executed with a common parent node (set of function calls)
-		Child nodes are then the set of entities (again grouped by symbol/CPU) that any entity of the parent node called
+		The basic tree has each node representing a set of entities, (by default)
+		grouped by symbol and CPU, and which were executed with a common parent
+		node (set of function calls)
+
+		Child nodes are then the set of entities (again grouped by symbol/CPU) that
+		any entity of the parent node called.
+
 		Child nodes therefore are of the same CPU (unless there was a fork)
+
+		(Optionally, the tree can be built with one function call per node, as a highly granular stack trace)
 
 		Only upon transformation can nodes be composed of entities from multiple groups or CPUs, through merging
 	"""
@@ -206,18 +213,38 @@ class PFGTree:
 			# for each group, create a node
 			for group, entities_for_group in entities_by_group.items():
 
-				cpus, wallclock_durations, parallelism_intervals = get_durations_for_entities(entities_for_group)
+				high_granularity = True
+				if high_granularity:
 
-				node = PFGTreeNode(
-					parent_node=parent_node,
-					name=group,
-					cpu=cpu,
-					wallclock_duration=wallclock_durations[0],
-					parallelism_intervals=parallelism_intervals,
-					depth=depth
-					)
+					for entity in entities_for_group:
 
-				parent_node_list.append(node)
+						entity_as_list = [entity]
+						cpus, wallclock_durations, parallelism_intervals = get_durations_for_entities(entity_as_list)
+
+						node = PFGTreeNode(
+							parent_node=parent_node,
+							name=group,
+							cpu=cpu,
+							wallclock_duration=wallclock_durations[0],
+							parallelism_intervals=parallelism_intervals,
+							depth=depth
+							)
+
+						parent_node_list.append(node)
+
+				else:
+					cpus, wallclock_durations, parallelism_intervals = get_durations_for_entities(entities_for_group)
+
+					node = PFGTreeNode(
+						parent_node=parent_node,
+						name=group,
+						cpu=cpu,
+						wallclock_duration=wallclock_durations[0],
+						parallelism_intervals=parallelism_intervals,
+						depth=depth
+						)
+
+					parent_node_list.append(node)
 		
 				# collect all children of these entities, and convert them to nodes
 				child_entities = []
