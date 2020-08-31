@@ -73,27 +73,26 @@ Passing `-h` to the runner provides the usage instructions:
 
 		required arguments:
 			-f TRACEFILE, --tracefile TRACEFILE
-							Filename to parse for events (as a CSV).
+				Filename to parse for events (as a CSV).
 
 		optional arguments:
 			-h, --help            show this help message and exit
 			-c HEIGHT_OPTION, --height_option HEIGHT_OPTION
-							Calculation method for the bar height when visualising
-							the parallel stack trace. Options are:1=CONSTANT,
-							2=CPU_TIME, 3=PARALLELISM_INEFFICIENCY.
+				Calculation method for the bar height when visualising
+				the parallel stack trace. Options are:1=CONSTANT,
+				2=CPU_TIME, 3=PARALLELISM_INEFFICIENCY.
 			-t TRANSFORM, --transform TRANSFORM
-							Transformation applied to visualise the parallel stack
-							trace. Options are:1=NONE, 2=AGGREGATE_CALLS,
-							3=VERTICAL_STACK_CPU, 4=COLLAPSE_GROUPS.
+				Transformation applied to visualise the parallel stack
+				trace. Options are:1=NONE, 2=AGGREGATE_CALLS,
+				3=VERTICAL_STACK_CPU, 4=COLLAPSE_GROUPS.
 			-o OUTPUT, --output OUTPUT
-							Output filename (if set, the PFG will be saved as
-							.PNG).
+				Output filename (if set, the PFG will be saved as .PNG)
 			-l LOGFILE, --logfile LOGFILE
-							Filename to output log messages (defaults to log.txt).
+				Filename to output log messages (defaults to log.txt).
 			-d LOG_LEVEL, --log_level LOG_LEVEL
-							Logging level. Options are:1=INFO, 2=DEBUG, 3=TRACE.
-			--tee 	Pipe logging messages to stdout as well as the log
-							file.
+				Logging level. Options are:1=INFO, 2=DEBUG, 3=TRACE.
+			--tee 	
+				Pipe logging messages to stdout as well as the log file
 
 ### Licence
 
