@@ -232,6 +232,9 @@ class PFGTree:
 
 						parent_node_list.append(node)
 
+						if len(entity.child_entities) > 0:
+							self.gen_tree_process_entities_into_child_nodes(node, entity.child_entities, node.child_nodes, depth+1)		
+
 				else:
 					cpus, wallclock_durations, parallelism_intervals = get_durations_for_entities(entities_for_group)
 
@@ -246,14 +249,14 @@ class PFGTree:
 
 					parent_node_list.append(node)
 		
-				# collect all children of these entities, and convert them to nodes
-				child_entities = []
-				for entity in entities_for_group:
-					for child_entity in entity.child_entities:
-						child_entities.append(child_entity)
-		
-				if len(child_entities) > 0:
-					self.gen_tree_process_entities_into_child_nodes(node, child_entities, node.child_nodes, depth+1)		
+					# collect all children of these entities, and convert them to nodes
+					child_entities = []
+					for entity in entities_for_group:
+						for child_entity in entity.child_entities:
+							child_entities.append(child_entity)
+			
+					if len(child_entities) > 0:
+						self.gen_tree_process_entities_into_child_nodes(node, child_entities, node.child_nodes, depth+1)		
 
 	"""
 		This function goes through all siblings node sets, and collects nodes (of any group) by CPU, and merges each collection
