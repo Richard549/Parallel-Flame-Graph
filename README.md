@@ -13,14 +13,19 @@ parallelism. It does not yet support task-based OpenMP parallelism.
 PFG examples, visualising a simple parallel program with a single OpenMP
 parallel loop executed by two OpenMP threads.
 
+#### Basic PFG showing all function calls
 ![Image of basic PFG showing all function calls](examples/images/basic.png?raw=true "Basic PFG showing all function calls")
 
+#### Aggregated PFG merging all similar function calls on the same CPU
 ![Image of aggregated PFG merging all similar function calls on the same CPU](examples/images/aggregate.png?raw=true "Aggregated PFG merging all similar function calls on the same CPU")
 
+#### Stacked PFG where calls from each CPU are stacked vertically
 ![Image of stacked PFG where calls from each CPU are stacked vertically](examples/images/stacked.png?raw=true "Stacked PFG where calls from each CPU are stacked vertically")
 
+#### Folded PFG where function calls are merged across CPUs
 ![Image of folded PFG where function calls are merged across CPUs](examples/images/folded.png?raw=true "Folded PFG where function calls are merged across CPUs")
 
+#### Folded PFG where width is proportional to wallclock and area is proportional to CPU time
 ![Image of folded PFG where width is proportional to wallclock and area is proportional to CPU time](examples/images/cpu_time.png?raw=true "Folded PFG where width is proportional to wallclock and area is proportional to CPU time")
 
 Work-in-progress: PFG where area of each bar is proportional to inefficient
@@ -64,31 +69,31 @@ Passing `-h` to the runner provides the usage instructions:
 
 		rneill:~/../Parallel-Flame-Graph$ python3 src/PfgRunner.py -h
 		usage: PfgRunner.py [-h] -f TRACEFILE [-c HEIGHT_OPTION] [-t TRANSFORM]
-												[-o OUTPUT] [-l LOGFILE] [-d LOG_LEVEL] [--tee]
+			[-o OUTPUT] [-l LOGFILE] [-d LOG_LEVEL] [--tee]
 
 		required arguments:
 			-f TRACEFILE, --tracefile TRACEFILE
-														Filename to parse for events (as a CSV).
+							Filename to parse for events (as a CSV).
 
 		optional arguments:
 			-h, --help            show this help message and exit
 			-c HEIGHT_OPTION, --height_option HEIGHT_OPTION
-														Calculation method for the bar height when visualising
-														the parallel stack trace. Options are:1=CONSTANT,
-														2=CPU_TIME, 3=PARALLELISM_INEFFICIENCY.
+							Calculation method for the bar height when visualising
+							the parallel stack trace. Options are:1=CONSTANT,
+							2=CPU_TIME, 3=PARALLELISM_INEFFICIENCY.
 			-t TRANSFORM, --transform TRANSFORM
-														Transformation applied to visualise the parallel stack
-														trace. Options are:1=NONE, 2=AGGREGATE_CALLS,
-														3=VERTICAL_STACK_CPU, 4=COLLAPSE_GROUPS.
+							Transformation applied to visualise the parallel stack
+							trace. Options are:1=NONE, 2=AGGREGATE_CALLS,
+							3=VERTICAL_STACK_CPU, 4=COLLAPSE_GROUPS.
 			-o OUTPUT, --output OUTPUT
-														Output filename (if set, the PFG will be saved as
-														.PNG).
+							Output filename (if set, the PFG will be saved as
+							.PNG).
 			-l LOGFILE, --logfile LOGFILE
-														Filename to output log messages (defaults to log.txt).
+							Filename to output log messages (defaults to log.txt).
 			-d LOG_LEVEL, --log_level LOG_LEVEL
-														Logging level. Options are:1=INFO, 2=DEBUG, 3=TRACE.
-			--tee                 Pipe logging messages to stdout as well as the log
-														file.
+							Logging level. Options are:1=INFO, 2=DEBUG, 3=TRACE.
+			--tee 	Pipe logging messages to stdout as well as the log
+							file.
 
 ### Licence
 
