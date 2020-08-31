@@ -7,6 +7,7 @@ from PfgUtil import debug_mode
 
 class TransformationOption(Enum):
 	NONE = auto()
+	AGGREGATE_CALLS = auto()
 	VERTICAL_STACK_CPU = auto()
 	COLLAPSE_GROUPS = auto()
 
@@ -99,6 +100,9 @@ class PFGTreeNode:
 			alignment_node=None
 			):
 
+		# TODO a node should maintain an aggregate name from its partitions
+
+		self.original_parent_node = parent_node
 		self.original_depth = depth
 		self.cpus = [cpu]
 		self.wallclock_durations = [wallclock_duration] # currently this is only ever of length 1 (corresponding to the total wallclock duration of the node partitions)
@@ -174,29 +178,29 @@ class PFGTreeNode:
 
 class PFGTree:
 
-	def __init__(self, root_entities):
+	def __init__(self, root_entities, aggregate_stack_frames_by_default=False):
 
 		self.merged_siblings_by_cpu = False
 		self.root_nodes = []
 
+		self.stack_frames_aggregated = aggregate_stack_frames_by_default
+
 		# As part of the constructor, build the tree
-		self.gen_tree_process_entities_into_child_nodes(None, root_entities, self.root_nodes, 0)
+		self.gen_tree_process_entities_into_child_nodes(None, root_entities, self.root_nodes, 0, aggregate_stack_frames_by_default)
 
 	"""
-		The basic tree has each node representing a set of entities, (by default)
-		grouped by symbol and CPU, and which were executed with a common parent
-		node (set of function calls)
+		The basic tree has each node representing an entity, i.e., a single stack
+		frame on a single CPU. A child node is thus a single function call from the
+		parent. Child nodes are therefore of the same CPU (unless there was a fork)
 
-		Child nodes are then the set of entities (again grouped by symbol/CPU) that
-		any entity of the parent node called.
+		Optionally, the tree can be built by default with the entitites aggregated
+		such that each node represents all entities of one function called by one
+		parent on one CPU
 
-		Child nodes therefore are of the same CPU (unless there was a fork)
-
-		(Optionally, the tree can be built with one function call per node, as a highly granular stack trace)
-
-		Only upon transformation can nodes be composed of entities from multiple groups or CPUs, through merging
+		Only upon transformation are nodes potentially composed of entities from
+		multiple groups or CPUs, through merging
 	"""
-	def gen_tree_process_entities_into_child_nodes(self, parent_node, entities, parent_node_list, depth):
+	def gen_tree_process_entities_into_child_nodes(self, parent_node, entities, parent_node_list, depth, aggregate_stack_frames_by_default):
 
 		# split the entities by CPU
 		entities_by_cpu = defaultdict(list)
@@ -213,8 +217,7 @@ class PFGTree:
 			# for each group, create a node
 			for group, entities_for_group in entities_by_group.items():
 
-				high_granularity = True
-				if high_granularity:
+				if aggregate_stack_frames_by_default == False:
 
 					for entity in entities_for_group:
 
@@ -233,7 +236,7 @@ class PFGTree:
 						parent_node_list.append(node)
 
 						if len(entity.child_entities) > 0:
-							self.gen_tree_process_entities_into_child_nodes(node, entity.child_entities, node.child_nodes, depth+1)		
+							self.gen_tree_process_entities_into_child_nodes(node, entity.child_entities, node.child_nodes, depth+1, aggregate_stack_frames_by_default)		
 
 				else:
 					cpus, wallclock_durations, parallelism_intervals = get_durations_for_entities(entities_for_group)
@@ -256,7 +259,43 @@ class PFGTree:
 							child_entities.append(child_entity)
 			
 					if len(child_entities) > 0:
-						self.gen_tree_process_entities_into_child_nodes(node, child_entities, node.child_nodes, depth+1)		
+						self.gen_tree_process_entities_into_child_nodes(node, child_entities, node.child_nodes, depth+1, aggregate_stack_frames_by_default)		
+	
+	"""
+		Transform the tree such that each node represents a set of entities,
+		grouped by symbol and CPU, which were executed with a common parent node
+		(set of function calls)
+
+		Child nodes are then the set of entities (again grouped by symbol/CPU) that
+		any entity of the parent node called.
+	"""
+	def transform_tree_aggregate_stack_frames(self):
+
+		self.stack_frames_aggregated = True
+
+		node_sets_queue = [self.root_nodes]
+
+		while len(node_sets_queue) > 0:
+
+			sibling_nodes = node_sets_queue[0]
+
+			sibling_nodes_by_group_by_cpu = {}
+			for node in sibling_nodes:
+				if node.cpus[0] in sibling_nodes_by_group_by_cpu:
+					sibling_nodes_by_group_by_cpu[node.cpus[0]][node.node_partitions[0].name].append(node)
+				else:
+					sibling_nodes_by_group_by_cpu[node.cpus[0]] = defaultdict(list)
+					sibling_nodes_by_group_by_cpu[node.cpus[0]][node.node_partitions[0].name].append(node)
+
+			for cpu, nodes_by_group in sibling_nodes_by_group_by_cpu.items():
+
+				for group, nodes in nodes_by_group.items():
+
+					# Because we are merging intra-CPU, there is no need to sort them to ensure we retain maximum wallclock
+					merged_node = self.merge_node_set(nodes)
+					node_sets_queue.append(merged_node.child_nodes)
+
+			node_sets_queue.pop(0)
 
 	"""
 		This function goes through all siblings node sets, and collects nodes (of any group) by CPU, and merges each collection
@@ -321,6 +360,9 @@ class PFGTree:
 		if len(nodes_to_merge) > 1:
 			while len(nodes_to_merge) > 1:
 				node_to_merge = nodes_to_merge[1]
+
+				# also make the merged node have the same original_parent_node as the base node
+				node_to_merge.original_parent_node = merged_node.original_parent_node
 
 				merged_node.execution_intervals.extend(node_to_merge.execution_intervals)
 				merged_node.child_nodes.extend(node_to_merge.child_nodes)
@@ -567,3 +609,25 @@ class PFGTree:
 
 			child_nodes = root_node.child_nodes
 			self.print_nodes(child_nodes, 1)
+
+	def assign_colour_indexes_to_nodes(self, nodes, mapped_nodes=None):
+
+		if mapped_nodes is None:
+			mapped_nodes = {}
+
+		for node in nodes:
+
+			if node.original_parent_node is None:
+				identifier = "None"
+			else:
+				identifier = "".join([part.name + ":"+ str(node.original_parent_node.original_depth) for part in node.original_parent_node.node_partitions])
+
+			if identifier not in mapped_nodes:
+				# assign a new index
+				next_index = len(mapped_nodes)
+				mapped_nodes[identifier] = next_index
+			
+			self.assign_colour_indexes_to_nodes(node.child_nodes, mapped_nodes)
+
+		return mapped_nodes
+

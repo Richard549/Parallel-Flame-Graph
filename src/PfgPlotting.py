@@ -37,12 +37,37 @@ class PFGHoverText:
 						if obj.get_gid() is not None:
 							text += obj.get_gid() + "\n"
 
+			if ax.highlighted_rectangle is not None:
+				ax.highlighted_rectangle.remove()
+				ax.highlighted_rectangle = None
+
 			if text == "":
 				self.hover_text.set_text("")
 				ax.figure.canvas.draw()
 			else:
 				self.hover_text.set_text(text)
 				self.hover_text.set_position((event.xdata, event.ydata))
+
+				# also highlight the rectangle of the parent!
+				# dodgy parsing for now
+				parent_identifier = text.split("Parent identifier: [")[1].split("]")[0]
+
+				if parent_identifier in ax.rectangles:
+					rectangle_coords = ax.rectangles[parent_identifier]
+					# draw a highlighted rectangle
+					rect = patches.Rectangle(
+						(rectangle_coords[0],rectangle_coords[2]),
+						rectangle_coords[1],
+						rectangle_coords[3],
+						linewidth=3,
+						edgecolor=(0.0,0.0,0.0,1.0),
+						facecolor=(0.0,0.0,0.0,0.0),
+						gid=None,
+						zorder=100)
+					ax.add_patch(rect)
+
+					ax.highlighted_rectangle = rect
+
 				ax.figure.canvas.draw()
 
 """
@@ -276,7 +301,8 @@ def plot_pfg_node(
 		parent_name,
 		colours,
 		colour_values,
-		cpus
+		cpus,
+		node_colour_mapping
 		):
 
 	total_wallclock_duration = max(node.wallclock_durations)
@@ -286,6 +312,41 @@ def plot_pfg_node(
 	total_node_height = max(heights)
 
 	edgecolour = (0.0,0.0,0.0,1.0)
+	
+	identifier = "".join([part.name + ":"+ str(node.original_depth) for part in node.node_partitions])
+
+	if node.original_parent_node is None:
+		parent_identifier = "None"
+	else:
+		parent_identifier = "".join([part.name + ":"+ str(node.original_parent_node.original_depth) for part in node.original_parent_node.node_partitions])
+
+	info_text = "Total duration: " + sizeof_fmt(total_wallclock_duration) + "\n"
+	info_text += "".join([part.name + ": " + sizeof_fmt(part.wallclock_duration) + "\n" for part in node.node_partitions]) + "\n"
+	info_text += "Original Parent Node=[" + str(node.original_parent_node) + "]\n"
+	info_text += "Identifier: [" + str(identifier) + "]\n"
+	info_text += "Parent identifier: [" + str(parent_identifier) + "]\n"
+	info_text += "Parent=[" + str(parent_name) + "]\n"
+	wallclock_durations_by_cpu = node.get_per_cpu_wallclock_durations()
+	for cpu, duration in wallclock_durations_by_cpu.items():
+		info_text += str(cpu) + ": " + str(sizeof_fmt(duration)) + "\n"
+
+	# Invisible rectangle just for the hover-over text
+	rect = patches.Rectangle(
+		(x0,y0),
+		total_node_width,
+		total_node_height,
+		linewidth=0,
+		edgecolor=(0.0,0.0,0.0,0.0),
+		facecolor=(0.0,0.0,0.0,0.0),
+		gid=info_text,
+		zorder=0)
+	
+	ax.add_patch(rect)
+
+	if ax.rectangles is None:
+		ax.rectangles = {identifier: [x0, total_node_width, y0, total_node_height]}
+	else:
+		ax.rectangles[identifier] = [x0, total_node_width, y0, total_node_height]
 
 	for part_idx, part in enumerate(node.node_partitions):
 		
@@ -293,15 +354,9 @@ def plot_pfg_node(
 		part_height = heights[part_idx]
 	
 		#facecolour = (1.0,1.0,1.0,1.0)
-		facecolour = colours(colour_values[cpus.index(node.cpus[0])]) # what colour for multiple CPUs?
+		facecolour = colours(colour_values[node_colour_mapping[parent_identifier]])
 
 		logging.trace("Plotting %s on cpus %s with width %f at x=%f,y=%f", part.name, node.cpus, part_width, x0, y0)
-
-		info_text = part.name + "\n"
-		info_text += "Parent=[" + str(parent_name) + "]\n"
-		wallclock_durations_by_cpu = node.get_per_cpu_wallclock_durations()
-		for cpu, duration in wallclock_durations_by_cpu.items():
-			info_text += str(cpu) + ": " + str(sizeof_fmt(duration)) + "\n"
 
 		rect = patches.Rectangle(
 			(x0,y0),
@@ -310,7 +365,7 @@ def plot_pfg_node(
 			linewidth=1,
 			edgecolor=edgecolour,
 			facecolor=facecolour,
-			gid=info_text,
+			gid=None,
 			zorder=10)
 
 		ax.add_patch(rect)
@@ -335,16 +390,24 @@ def plot_pfg_tree(tree,
 
 	colours = cm.get_cmap("Reds")
 
-	# TODO make better use of colours (and also, have a graph class that has the colour-mappings as a member
-	maximum_colour = 0.3;
-	minimum_colour = 0.05;
-	colour_step = (maximum_colour-minimum_colour)/len(cpus)
-	colour_values = [(i+1)*colour_step + minimum_colour for i in range(len(cpus))]
+	# There should be a colour for each 'original parent'
+	node_colour_mapping = tree.assign_colour_indexes_to_nodes(tree.root_nodes)
+
+	maximum_colour = 0.65;
+	#minimum_colour = 0.05;
+	minimum_colour = 0.00;
+	colour_step = (maximum_colour-minimum_colour)/len(node_colour_mapping)
+	colour_values = [(i+1)*colour_step + minimum_colour for i in range(len(node_colour_mapping))]
 	random.shuffle(colour_values)
+
+	logging.info("Colour values:", colour_values)
 
 	fig = plt.figure()
 	fig.set_size_inches(14, 8)
 	ax = fig.add_subplot(111)
+
+	ax.rectangles = {}
+	ax.highlighted_rectangle = None
 
 	top_level_width = 100.0
 
@@ -396,7 +459,8 @@ def plot_pfg_tree(tree,
 				parent_name = "None"
 				if node.parent_node is not None:
 					y_position = node.parent_node.start_y + node.parent_node.height
-					parent_name = " and ".join(["("+part.name+")" for part in node.parent_node.node_partitions])
+				if node.original_parent_node is not None:
+					parent_name = " and ".join(["("+part.name+")" for part in node.original_parent_node.node_partitions])
 
 				# Plot the node
 				width, height = plot_pfg_node(ax,
@@ -411,7 +475,8 @@ def plot_pfg_tree(tree,
 					parent_name,
 					colours,
 					colour_values,
-					cpus
+					cpus,
+					node_colour_mapping
 					)
 
 				# write the positions of this node for my children/siblings

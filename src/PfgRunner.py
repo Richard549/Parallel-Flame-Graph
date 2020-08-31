@@ -23,7 +23,7 @@ def run_pfg(
 		cpus) = process_events(tracefile)
 
 	logging.info("Generating the tree.")
-	tree = PFGTree(top_level_entities)
+	tree = PFGTree(top_level_entities, True)
 
 	if debug_mode():
 		logging.debug("Printing tree:")	
@@ -33,6 +33,9 @@ def run_pfg(
 	if transformation == TransformationOption.NONE:
 		transformed = False
 		logging.info("Applying no tree transformation.")	
+	elif transformation == TransformationOption.AGGREGATE_CALLS:
+		logging.info("Transforming tree to aggregate repeated function calls into single nodes.")	
+		tree.transform_tree_aggregate_stack_frames()
 	elif transformation == TransformationOption.VERTICAL_STACK_CPU:
 		logging.info("Transforming tree to stack CPU entities vertically.")	
 		tree.transform_tree_stack_cpu_vertically()
