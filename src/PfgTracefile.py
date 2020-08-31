@@ -58,14 +58,14 @@ class Entity:
 		self.per_cpu_top_of_stack_intervals[cpu] += interval
 	
 	def add_top_of_stack_parallelism_interval(self, parallelism, interval):
-		self.top_of_stack_parallelism_intervals[parallelism] += interval
+		self.top_of_stack_parallelism_intervals[parallelism+1] += interval
 	
 	# TODO what does this mean? each CPU has it's own top_of_stack parallelism interval?
 	def add_per_cpu_top_of_stack_parallelism_interval(self, parallelism, interval, cpu):
 		if cpu not in self.per_cpu_top_of_stack_parallelism_intervals:
 			self.per_cpu_top_of_stack_parallelism_intervals[cpu] = defaultdict(int)
 				
-		self.per_cpu_top_of_stack_parallelism_intervals[cpu][parallelism] += interval
+		self.per_cpu_top_of_stack_parallelism_intervals[cpu][parallelism+1] += interval
 
 def parse_trace(filename):
 

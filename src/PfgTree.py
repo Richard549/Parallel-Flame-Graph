@@ -11,6 +11,10 @@ class TransformationOption(Enum):
 	VERTICAL_STACK_CPU = auto()
 	COLLAPSE_GROUPS = auto()
 
+class ColourMode(Enum):
+	BY_PARENT = auto()
+	BY_CPU = auto()
+
 def get_durations_for_entities(
 		entities
 		):
@@ -30,23 +34,16 @@ def get_durations_for_entities(
 	
 	cpus = []
 	wallclock_durations = []
-	parallelism_intervals_list = []
 	for cpu, duration in wallclock_duration_by_cpu.items():
 		cpus.append(cpu)
 		wallclock_durations.append(duration)
 
-	for parallelism, interval in parallelism_intervals.items():
-		while (parallelism-1) >= len(parallelism_intervals_list):
-			parallelism_intervals_list.append(0)
-
-		parallelism_intervals_list[parallelism-1] += interval
-	
 	if len(cpus) > 1:
 		sorted_indices = np.argsort(wallclock_durations)[::-1]
 		wallclock_durations = np.array(wallclock_durations)[sorted_indices].tolist()
 		cpus = np.array(cpus)[sorted_indices].tolist()
 
-	return cpus, wallclock_durations, parallelism_intervals_list
+	return cpus, wallclock_durations, parallelism_intervals
 
 """
 	This is what will actually be plotted as a sub-bar
@@ -141,8 +138,8 @@ class PFGTreeNode:
 			if execution_interval.cpu not in self.cpus:
 				self.cpus.append(execution_interval.cpu)
 
-				for parallelism_idx, parallelism_interval in enumerate(execution_interval.parallelism_intervals):
-					parallelism_intervals_by_group[execution_interval.name][parallelism_idx] += parallelism_interval 
+				for parallelism, interval in execution_interval.parallelism_intervals.items():
+					parallelism_intervals_by_group[execution_interval.name][parallelism] += interval 
 			else:
 				parallelism_intervals_by_group[execution_interval.name] = execution_interval.parallelism_intervals
 
@@ -184,6 +181,8 @@ class PFGTree:
 		self.root_nodes = []
 
 		self.stack_frames_aggregated = aggregate_stack_frames_by_default
+
+		self.colour_mode = ColourMode.BY_CPU
 
 		# As part of the constructor, build the tree
 		self.gen_tree_process_entities_into_child_nodes(None, root_entities, self.root_nodes, 0, aggregate_stack_frames_by_default)
@@ -361,7 +360,6 @@ class PFGTree:
 			while len(nodes_to_merge) > 1:
 				node_to_merge = nodes_to_merge[1]
 
-				# also make the merged node have the same original_parent_node as the base node
 				node_to_merge.original_parent_node = merged_node.original_parent_node
 
 				merged_node.execution_intervals.extend(node_to_merge.execution_intervals)
@@ -375,6 +373,7 @@ class PFGTree:
 				for child_node in node_to_merge.child_nodes:
 					child_node.parent_node = merged_node
 					child_node.ancestor_alignment_node = merged_node
+					child_node.original_parent_node = merged_node
 
 				nodes_to_merge.remove(node_to_merge)
 
@@ -408,6 +407,8 @@ class PFGTree:
 			of the base node
 	"""
 	def transform_tree_collapse_groups(self):
+		
+		self.colour_mode = ColourMode.BY_PARENT
 
 		# Assumes each node has one cpu and one group, and that node.cpus and node.wallclock_durations is correct
 		parent_nodes_to_process = [node for node in self.root_nodes]
@@ -545,21 +546,27 @@ class PFGTree:
 
 				original_depths = []
 				wallclock_durations = []
+				cpus = []
 				node_indices = []
 				for child_node_idx, child_node in enumerate(parent_node.child_nodes):
 					wallclock_durations.append(max(child_node.wallclock_durations))
 					original_depths.append(child_node.original_depth)
 					node_indices.append(child_node_idx)
+					cpus.append(child_node.cpus[0])
 
 				# Before displaying the next 'level' of child nodes, make sure we have first displayed all of the CPUs on the previous level
 				same_original_depth = (original_depths.count(original_depths[0]) == len(original_depths))
-				child_node_index = None
+
+				filtered_cpus = cpus
+				filtered_node_indices = node_indices
 				if same_original_depth == False:
-					min_depth_position = original_depths.index(min(original_depths))
-					child_node_index = node_indices[min_depth_position]
-				else:
-					max_wallclock_position = wallclock_durations.index(max(wallclock_durations))
-					child_node_index = node_indices[max_wallclock_position]
+					# filter the lists to only those nodes which have the minimum depths
+					minimum_depth_indices = [idx for idx, d in enumerate(original_depths) if d == min(original_depths)]
+					filtered_cpus = [cpu for idx, cpu in enumerate(cpus) if idx in minimum_depth_indices]
+					filtered_node_indices = [idx for idx, cpu in enumerate(cpus) if idx in minimum_depth_indices]
+
+				minimum_filtered_cpu = min(filtered_cpus)
+				child_node_index = filtered_node_indices[filtered_cpus.index(minimum_filtered_cpu)]
 				
 				new_child_node = parent_node.child_nodes[child_node_index]
 				other_child_nodes = [node for node_idx, node in enumerate(parent_node.child_nodes) if node_idx != child_node_index]
@@ -578,12 +585,12 @@ class PFGTree:
 	def print_nodes(self, nodes, depth):
 
 		for node_idx, node in enumerate(nodes):
-			name = " and ".join([part.name for part in node.node_partitions])
+			name = str(hex(id(node))) + ":" + " and ".join([part.name for part in node.node_partitions])
 			cpus = "[" + ",".join([str(cpu) for cpu in node.cpus]) + "]"
 			durations = "[" + ",".join([str(part.wallclock_duration) for part in node.node_partitions]) + "]"
 			cpu_times = "[" + ",".join([str(part.cpu_time) for part in node.node_partitions]) + "]"
-			parallelism_intervals = "[" + ",".join([str(part.parallelism_intervals) for part in node.node_partitions]) + "]"
-			parent_node_name = " and ".join([part.name for part in node.parent_node.node_partitions])
+			parallelism_intervals = "[" + ",".join([str(list(part.parallelism_intervals.values())) for part in node.node_partitions]) + "]"
+			parent_node_name = str(hex(id(node.original_parent_node))) + ":" + " and ".join([part.name for part in node.original_parent_node.node_partitions])
 
 			logging.debug("Depth %d node %d/%d on CPUs %s for durations %s with parallelism intervals %s and cpu times %s: %s with parent node [%s]",
 				depth,
@@ -602,7 +609,7 @@ class PFGTree:
 
 		for node_idx, root_node in enumerate(self.root_nodes):
 
-			name = " and ".join([part.name for part in root_node.node_partitions])
+			name = str(hex(id(root_node))) + ":" + " and ".join([part.name for part in root_node.node_partitions])
 			cpus = "[" + ",".join([str(cpu) for cpu in root_node.cpus]) + "]"
 			durations = "[" + ",".join([str(part.wallclock_duration) for part in root_node.node_partitions]) + "]"
 			logging.debug("Descending root node %d/%d on CPUs %s for durations %s: %s", node_idx+1, len(self.root_nodes), cpus, durations, name)
@@ -617,15 +624,21 @@ class PFGTree:
 
 		for node in nodes:
 
-			if node.original_parent_node is None:
-				identifier = "None"
+			if self.colour_mode == ColourMode.BY_PARENT:
+				if node.original_parent_node is None:
+					colour_identifier = "None"
+				else:
+					colour_identifier = str(hex(id(node.original_parent_node)))
+			elif self.colour_mode == ColourMode.BY_CPU:
+				colour_identifier = ",".join([str(cpu) for cpu in node.cpus])
 			else:
-				identifier = "".join([part.name + ":"+ str(node.original_parent_node.original_depth) for part in node.original_parent_node.node_partitions])
+				logging.error("Colour mode not supported.")
+				raise NotImplementedError()
 
-			if identifier not in mapped_nodes:
+			if colour_identifier not in mapped_nodes:
 				# assign a new index
 				next_index = len(mapped_nodes)
-				mapped_nodes[identifier] = next_index
+				mapped_nodes[colour_identifier] = next_index
 			
 			self.assign_colour_indexes_to_nodes(node.child_nodes, mapped_nodes)
 

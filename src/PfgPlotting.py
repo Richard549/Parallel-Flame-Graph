@@ -11,6 +11,7 @@ import logging
 from enum import Enum, auto
 
 from PfgUtil import sizeof_fmt
+from PfgTree import ColourMode
 
 class HeightDisplayOption(Enum):
 	CONSTANT = auto()
@@ -50,7 +51,7 @@ class PFGHoverText:
 
 				# also highlight the rectangle of the parent!
 				# dodgy parsing for now
-				parent_identifier = text.split("Parent identifier: [")[1].split("]")[0]
+				parent_identifier = text.split("Parent=[")[1].split("\n")[0].split(":")[-1].split("]")[0]
 
 				if parent_identifier in ax.rectangles:
 					rectangle_coords = ax.rectangles[parent_identifier]
@@ -59,11 +60,12 @@ class PFGHoverText:
 						(rectangle_coords[0],rectangle_coords[2]),
 						rectangle_coords[1],
 						rectangle_coords[3],
-						linewidth=3,
+						linewidth=4,
 						edgecolor=(0.0,0.0,0.0,1.0),
 						facecolor=(0.0,0.0,0.0,0.0),
 						gid=None,
-						zorder=100)
+						zorder=100,
+						clip_on=False)
 					ax.add_patch(rect)
 
 					ax.highlighted_rectangle = rect
@@ -268,18 +270,22 @@ def calculate_node_height(
 		elif height_option == HeightDisplayOption.PARALLELISM_INEFFICIENCY:
 
 			total_cpu_cycles_lost = 0
-			for parallelism, interval in enumerate(part.parallelism_intervals):
-				optimal_cpu_cycles = ((parallelism+1.0)/maximum_parallelism) * interval
+			for parallelism, interval in part.parallelism_intervals.items():
+				optimal_cpu_cycles = ((parallelism)/maximum_parallelism) * interval
 				total_cpu_cycles_lost += (interval - optimal_cpu_cycles)
 			
 			logging.debug("Node [%s] total_cpu_cycles_lost %s from parallelism intervals %s",
 				",".join([part.name for part in node.node_partitions]),
 				sizeof_fmt(total_cpu_cycles_lost),
-				",".join([str(part.parallelism_intervals) for part in node.node_partitions])
+				",".join([str(list(str(part.parallelism_intervals.values()))) for part in node.node_partitions])
 				)
 
 			part_width = width_to_interval_ratio * part.wallclock_duration
 			part_height = ((total_cpu_cycles_lost / reference_height_value) * reference_area) / part_width
+
+			if part_height == 0.0:
+				part_height = 0.0001 * reference_height # just so that we can zoom in if we want to see what the thing is
+
 			heights.append(part_height)
 
 		else:
@@ -302,7 +308,8 @@ def plot_pfg_node(
 		colours,
 		colour_values,
 		cpus,
-		node_colour_mapping
+		node_colour_mapping,
+		colour_mode
 		):
 
 	total_wallclock_duration = max(node.wallclock_durations)
@@ -312,20 +319,28 @@ def plot_pfg_node(
 	total_node_height = max(heights)
 
 	edgecolour = (0.0,0.0,0.0,1.0)
-	
-	identifier = "".join([part.name + ":"+ str(node.original_depth) for part in node.node_partitions])
 
+	# Key to use to determine the colour of the rectangle
+	colour_identifier = "None"
+	if colour_mode == ColourMode.BY_PARENT:
+		if node.original_parent_node is not None:
+			colour_identifier = str(hex(id(node.original_parent_node)))
+	elif colour_mode == ColourMode.BY_CPU:
+		colour_identifier = ",".join([str(cpu) for cpu in node.cpus])
+	else:
+		logging.error("Colour mode not supported.")
+		raise NotImplementedError()
+	
+	# To enable hover-over to find the correct parent, record the unique ids for the rectangles
+	node_identifier = str(hex(id(node)))
 	if node.original_parent_node is None:
 		parent_identifier = "None"
 	else:
-		parent_identifier = "".join([part.name + ":"+ str(node.original_parent_node.original_depth) for part in node.original_parent_node.node_partitions])
+		parent_identifier = str(hex(id(node.original_parent_node)))
 
 	info_text = "Total duration: " + sizeof_fmt(total_wallclock_duration) + "\n"
 	info_text += "".join([part.name + ": " + sizeof_fmt(part.wallclock_duration) + "\n" for part in node.node_partitions]) + "\n"
-	info_text += "Original Parent Node=[" + str(node.original_parent_node) + "]\n"
-	info_text += "Identifier: [" + str(identifier) + "]\n"
-	info_text += "Parent identifier: [" + str(parent_identifier) + "]\n"
-	info_text += "Parent=[" + str(parent_name) + "]\n"
+	info_text += "Parent=[" + str(parent_name) + ":" + str(parent_identifier) + "]\n"
 	wallclock_durations_by_cpu = node.get_per_cpu_wallclock_durations()
 	for cpu, duration in wallclock_durations_by_cpu.items():
 		info_text += str(cpu) + ": " + str(sizeof_fmt(duration)) + "\n"
@@ -344,9 +359,9 @@ def plot_pfg_node(
 	ax.add_patch(rect)
 
 	if ax.rectangles is None:
-		ax.rectangles = {identifier: [x0, total_node_width, y0, total_node_height]}
+		ax.rectangles = {node_identifier: [x0, total_node_width, y0, total_node_height]}
 	else:
-		ax.rectangles[identifier] = [x0, total_node_width, y0, total_node_height]
+		ax.rectangles[node_identifier] = [x0, total_node_width, y0, total_node_height]
 
 	for part_idx, part in enumerate(node.node_partitions):
 		
@@ -354,7 +369,7 @@ def plot_pfg_node(
 		part_height = heights[part_idx]
 	
 		#facecolour = (1.0,1.0,1.0,1.0)
-		facecolour = colours(colour_values[node_colour_mapping[parent_identifier]])
+		facecolour = colours(colour_values[node_colour_mapping[colour_identifier]])
 
 		logging.trace("Plotting %s on cpus %s with width %f at x=%f,y=%f", part.name, node.cpus, part_width, x0, y0)
 
@@ -400,8 +415,6 @@ def plot_pfg_tree(tree,
 	colour_values = [(i+1)*colour_step + minimum_colour for i in range(len(node_colour_mapping))]
 	random.shuffle(colour_values)
 
-	logging.info("Colour values:", colour_values)
-
 	fig = plt.figure()
 	fig.set_size_inches(14, 8)
 	ax = fig.add_subplot(111)
@@ -428,8 +441,8 @@ def plot_pfg_tree(tree,
 
 	if height_option == HeightDisplayOption.PARALLELISM_INEFFICIENCY:
 		total_cpu_cycles_lost = 0
-		for parallelism, interval in enumerate(tree.root_nodes[0].node_partitions[0].parallelism_intervals):
-			optimal_cpu_cycles = ((parallelism+1.0)/len(cpus)) * interval
+		for parallelism, interval in tree.root_nodes[0].node_partitions[0].parallelism_intervals.items():
+			optimal_cpu_cycles = ((parallelism)/len(cpus)) * interval
 			total_cpu_cycles_lost += (interval - optimal_cpu_cycles)
 
 		reference_height_value = total_cpu_cycles_lost
@@ -476,7 +489,8 @@ def plot_pfg_tree(tree,
 					colours,
 					colour_values,
 					cpus,
-					node_colour_mapping
+					node_colour_mapping,
+					tree.colour_mode
 					)
 
 				# write the positions of this node for my children/siblings
@@ -502,7 +516,7 @@ def plot_pfg_tree(tree,
 	ax.set_facecolor((0.9, 0.9, 0.9))
 
 	ax.set_xlim([0,maximum_x])
-	ax.set_ylim([0,maximum_y*1.5])
+	ax.set_ylim([0,maximum_y*1.25])
 
 	# Create the hover-over
 	hover_text = PFGHoverText(ax)

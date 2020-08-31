@@ -23,7 +23,7 @@ def run_pfg(
 		cpus) = process_events(tracefile)
 
 	logging.info("Generating the tree.")
-	tree = PFGTree(top_level_entities, True)
+	tree = PFGTree(top_level_entities)
 
 	if debug_mode():
 		logging.debug("Printing tree:")	
