@@ -67,6 +67,16 @@ class Entity:
 				
 		self.per_cpu_top_of_stack_parallelism_intervals[cpu][parallelism+1] += interval
 
+import subprocess
+
+def file_len(fname):
+		p = subprocess.Popen(['wc', '-l', fname], stdout=subprocess.PIPE, 
+																							stderr=subprocess.PIPE)
+		result, err = p.communicate()
+		if p.returncode != 0:
+				raise IOError(err)
+		return int(result.strip().split()[0])
+
 def parse_trace(filename):
 
 	logging.debug("Parsing the tracefile %s.", filename)
@@ -83,11 +93,20 @@ def parse_trace(filename):
 
 	min_timestamp = -1
 	max_timestamp = -1
+
+	num_lines = file_len(filename)
 	
 	with open(filename, 'r') as f:
+		line_idx = -1
 		for line in f:
+
+			line_idx += 1
+
 			if line.strip() == "":
 				continue
+
+			if line_idx % int(num_lines/10.0) == 0:
+				logging.debug("Parsed line %d of %d.", line_idx+1, num_lines)
 
 			split_line = line.strip().split(",")
 			cpu = int(split_line[1])
@@ -907,6 +926,7 @@ def process_events(filename):
 	# And another CPU picks up that task, that other CPU should execute the task as a child of the function that created it
 
 	logging.debug("Processing the constructs found in the tracefile.")
+	logging.trace("The main CPU was: %d", main_cpu)
 
 	saved_call_stacks = {}
 	saved_call_stacks["init"] = []
