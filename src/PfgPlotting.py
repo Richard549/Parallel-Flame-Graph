@@ -327,6 +327,13 @@ def plot_pfg_node(
 			colour_identifier = str(hex(id(node.original_parent_node)))
 	elif colour_mode == ColourMode.BY_CPU:
 		colour_identifier = ",".join([str(cpu) for cpu in node.cpus])
+	elif colour_mode == ColourMode.BY_PARALLELISM:
+		# identifier is the number of cycles lost due to inefficiency, so the colours are ordered
+		total_cpu_cycles_lost = 0
+		for parallelism, interval in node.node_partitions[0].parallelism_intervals.items():
+			optimal_cpu_cycles = ((parallelism)/len(cpus)) * interval
+			total_cpu_cycles_lost += (interval - optimal_cpu_cycles)
+		colour_identifier = total_cpu_cycles_lost
 	else:
 		logging.error("Colour mode not supported.")
 		raise NotImplementedError()
@@ -371,6 +378,13 @@ def plot_pfg_node(
 		#facecolour = (1.0,1.0,1.0,1.0)
 		facecolour = colours(colour_values[node_colour_mapping[colour_identifier]])
 
+		if colour_mode == ColourMode.BY_PARALLELISM:
+			logging.info(node_colour_mapping)
+			mapping_list = node_colour_mapping.keys()
+			mapping_list = sorted(mapping_list)
+			colour_idx = mapping_list.index(colour_identifier)
+			facecolour = colours(colour_values[colour_idx])
+
 		logging.trace("Plotting %s on cpus %s with width %f at x=%f,y=%f", part.name, node.cpus, part_width, x0, y0)
 
 		rect = patches.Rectangle(
@@ -396,7 +410,8 @@ def plot_pfg_tree(tree,
 		max_timestamp,
 		cpus,
 		height_option,
-		output_file=None
+		output_file=None,
+		x_bounds=None
 		):
 
 	if len(tree.root_nodes) == 0:
@@ -406,14 +421,18 @@ def plot_pfg_tree(tree,
 	colours = cm.get_cmap("Reds")
 
 	# There should be a colour for each 'original parent'
-	node_colour_mapping = tree.assign_colour_indexes_to_nodes(tree.root_nodes)
+	node_colour_mapping = tree.assign_colour_indexes_to_nodes(tree.root_nodes, len(cpus))
 
 	maximum_colour = 0.65;
 	#minimum_colour = 0.05;
 	minimum_colour = 0.00;
 	colour_step = (maximum_colour-minimum_colour)/len(node_colour_mapping)
 	colour_values = [(i+1)*colour_step + minimum_colour for i in range(len(node_colour_mapping))]
-	random.shuffle(colour_values)
+
+	if tree.colour_mode == ColourMode.BY_PARALLELISM:
+		colour_values = list(reversed(colour_values))
+	else:
+		random.shuffle(colour_values)
 
 	fig = plt.figure()
 	fig.set_size_inches(14, 8)
@@ -515,7 +534,15 @@ def plot_pfg_tree(tree,
 	# Now display	
 	ax.set_facecolor((0.9, 0.9, 0.9))
 
-	ax.set_xlim([0,maximum_x])
+	if x_bounds is None:
+		ax.set_xlim([0,maximum_x])
+	else:
+
+		maximum_x_cycles = x_bounds[1]
+		coefficient = maximum_x_cycles/max_timestamp
+
+		ax.set_xlim([0, coefficient*maximum_x])
+
 	ax.set_ylim([0,maximum_y*1.25])
 
 	# Create the hover-over

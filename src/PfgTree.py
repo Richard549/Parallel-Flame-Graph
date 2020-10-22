@@ -8,12 +8,14 @@ from PfgUtil import debug_mode
 class TransformationOption(Enum):
 	NONE = auto()
 	AGGREGATE_CALLS = auto()
+	MERGE_CALLS_ACROSS_CPUS = auto()
 	VERTICAL_STACK_CPU = auto()
 	COLLAPSE_GROUPS = auto()
 
 class ColourMode(Enum):
 	BY_PARENT = auto()
 	BY_CPU = auto()
+	BY_PARALLELISM = auto()
 
 def get_durations_for_entities(
 		entities
@@ -124,7 +126,10 @@ class PFGTreeNode:
 		self.start_y = None
 		self.height = None
 
-	def build_node_partitions_from_intervals(self):
+	"""
+		If cpu_time is True, the wallclock times for different CPUs will be added so that the result is a node with CPU time
+	"""
+	def build_node_partitions_from_intervals(self, cpu_time=False):
 		self.node_partitions.clear()
 
 		wallclock_durations_by_group = defaultdict(int)
@@ -132,7 +137,7 @@ class PFGTreeNode:
 		parallelism_intervals_by_group = {}
 		for execution_interval in self.execution_intervals:
 
-			if execution_interval.cpu == self.cpus[0]:
+			if cpu_time == True or execution_interval.cpu == self.cpus[0]:
 				wallclock_durations_by_group[execution_interval.name] += execution_interval.duration
 			
 			if execution_interval.cpu not in self.cpus:
@@ -325,14 +330,42 @@ class PFGTree:
 				node_sets_queue.append(merged_node.child_nodes)
 
 			node_sets_queue.pop(0)
+
+	def transform_tree_aggregate_siblings_across_cpus(self):
+
+		self.colour_mode = ColourMode.BY_PARALLELISM
+
+		if self.stack_frames_aggregated == False:
+			self.transform_tree_aggregate_stack_frames()
+
+		# Assuemes that each node currently only represents execution on one CPU
+		node_sets_queue = [self.root_nodes]
+
+		while len(node_sets_queue) > 0:
+
+			sibling_nodes = node_sets_queue[0]
+
+			sibling_nodes_by_group = defaultdict(list)
+			for node in sibling_nodes:
+				sibling_nodes_by_group[node.node_partitions[0].name].append(node)
+
+			# Now merge all of the siblings into one node, regardless of cpu
+			for group, nodes in sibling_nodes_by_group.items():
+
+				# We do need to sort so that the CPU that took the longest to execute the function defines the wallclock
+				merged_node = self.merge_node_set(nodes, True)
+				node_sets_queue.append(merged_node.child_nodes)
+
+			node_sets_queue.pop(0)
 	
 	"""
 		Take a set of nodes and merge them into a single node with the union of all execution intervals
 		If sort is False, the *first* node in the list is the base node that others will be merged into
 			- meaning its wallclock will be used for node width when the tree is plot)
 		If sort is True, the function will find the node with the maximum wallclock on its CPU to be the base node
+		if cpu_time is True, the wallclocks of nodes merged across CPUs will be *added* so that the result is CPU time
 	"""
-	def merge_node_set(self, nodes_to_merge, sort=True):
+	def merge_node_set(self, nodes_to_merge, sort=True, cpu_time=False):
 
 		if len(nodes_to_merge) == 1:
 			return nodes_to_merge[0]
@@ -377,7 +410,7 @@ class PFGTree:
 
 				nodes_to_merge.remove(node_to_merge)
 
-		merged_node.build_node_partitions_from_intervals()
+		merged_node.build_node_partitions_from_intervals(cpu_time)
 
 		return merged_node
 
@@ -617,7 +650,7 @@ class PFGTree:
 			child_nodes = root_node.child_nodes
 			self.print_nodes(child_nodes, 1)
 
-	def assign_colour_indexes_to_nodes(self, nodes, mapped_nodes=None):
+	def assign_colour_indexes_to_nodes(self, nodes, num_cpus, mapped_nodes=None):
 
 		if mapped_nodes is None:
 			mapped_nodes = {}
@@ -631,6 +664,13 @@ class PFGTree:
 					colour_identifier = str(hex(id(node.original_parent_node)))
 			elif self.colour_mode == ColourMode.BY_CPU:
 				colour_identifier = ",".join([str(cpu) for cpu in node.cpus])
+			elif self.colour_mode == ColourMode.BY_PARALLELISM:
+				# identifier is the number of cycles lost due to inefficiency, so the colours are ordered
+				total_cpu_cycles_lost = 0
+				for parallelism, interval in node.node_partitions[0].parallelism_intervals.items():
+					optimal_cpu_cycles = ((parallelism)/num_cpus) * interval
+					total_cpu_cycles_lost += (interval - optimal_cpu_cycles)
+				colour_identifier = total_cpu_cycles_lost
 			else:
 				logging.error("Colour mode not supported.")
 				raise NotImplementedError()
@@ -640,7 +680,7 @@ class PFGTree:
 				next_index = len(mapped_nodes)
 				mapped_nodes[colour_identifier] = next_index
 			
-			self.assign_colour_indexes_to_nodes(node.child_nodes, mapped_nodes)
+			self.assign_colour_indexes_to_nodes(node.child_nodes, num_cpus, mapped_nodes)
 
 		return mapped_nodes
 

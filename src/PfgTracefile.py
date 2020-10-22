@@ -296,7 +296,7 @@ def parse_trace(filename):
 
 	entries.sort(key=lambda x: x.start)
 	exits.sort(key=lambda x: x.end)
-	
+
 	logging.debug("Finished parsing the tracefile %s.", filename)
 
 	return entries, exits, unique_groups, max_cpu, main_cpu, min_timestamp, max_timestamp
@@ -614,9 +614,16 @@ def process_exit(entity, saved_call_stacks, current_call_stack_per_cpu, top_leve
 			raise ValueError()
 
 		top_of_stack = call_stack[-1]
+
 		if top_of_stack is not entity:
-			logging.error("Processing work entity exit, and it was not top of stack.")
-			raise ValueError()
+			logging.error("Processing work entity exit, and it was not top of stack, so moving forward one position.")
+
+			# if it is not top of the stack, just move this exit forward and go again
+			exits[exit_idx-1] = exits[exit_idx]
+			logging.debug("Set exits[%d] to %s", exit_idx-1, exits[exit_idx])
+			exits[exit_idx] = entity
+			logging.debug("Set exits[%d] to %s", exit_idx, entity)
+			return 1
 		
 		# for OpenMP for-loops, once the work region is finished, we can kill the call stack
 
@@ -642,6 +649,8 @@ def process_exit(entity, saved_call_stacks, current_call_stack_per_cpu, top_leve
 	else:
 		logging.error("No parsing support for %s", entity.entity_type)
 		raise NotImplementedError()
+
+	return 0
 
 def update_parallelism_intervals_for_cpu(
 		is_start,
@@ -804,8 +813,46 @@ def update_parallelism_intervals_on_exit(
 	elif entity.entity_type == EntityType.IMPLICIT_TASK_REGION:
 		pass
 
-	elif (entity.entity_type == EntityType.SYNC_REGION or 
-			entity.entity_type == EntityType.WORK):
+	elif entity.entity_type == EntityType.WORK:
+		
+		#if it's not at top of stack, don't do anything
+		call_stack = saved_call_stacks[current_call_stack_per_cpu[entity.cpu][-1]]
+		if len(call_stack) == 0:
+			logging.error("Processing exit of work or sync_region, and there is no entity on top of stack")
+			raise ValueError()
+
+		top_of_stack = call_stack[-1]
+		if top_of_stack is not entity:
+			# Don't do anything because we aren't going to process this exit yet
+			# This is to fix the weird thing where a WORK callback can finish BEFORE the stack frame exit that it encloses
+			return prior_parallelism, previous_processed_times_per_cpu
+
+		updated_processed_times_per_cpu = update_parallelism_intervals_for_cpu(
+			False,
+			entity,
+			saved_call_stacks,
+			current_call_stack_per_cpu,
+			prior_parallelism,
+			previous_processed_times_per_cpu,
+			main_cpu)
+		
+		current_work_state = work_state_stack_per_cpu[entity.cpu].pop()
+		if current_work_state == True:
+			if work_state_stack_per_cpu[entity.cpu][-1] == True:
+				pass # no change
+			else:
+				# going from work to non work
+				logging.trace("%s:swap to not active parallelism:%s:%s:%s", entity.cpu, entity.group, entity.entity_type, entity)
+				updated_parallelism -= 1
+		else:
+			if work_state_stack_per_cpu[entity.cpu][-1] == True:
+				# going from non-work to work
+				logging.trace("%s:swap to active parallelism:%s:%s:%s", entity.cpu, entity.group, entity.entity_type, entity)
+				updated_parallelism += 1
+			else:
+				pass # no change
+
+	elif entity.entity_type == EntityType.SYNC_REGION:
 		
 		updated_processed_times_per_cpu = update_parallelism_intervals_for_cpu(
 			False,
@@ -1027,12 +1074,15 @@ def process_events(filename):
 				t1 = time.time()
 				total_parallelism_exit_time += (t1 - t0)
 
-			process_exit(next_entity,
+			error = process_exit(next_entity,
 				saved_call_stacks,
 				current_call_stack_per_cpu,
 				top_level_entities,
 				exits,
 				exit_idx)
+
+			if error == 1:
+				exit_idx -= 1
 
 			if debug_mode():
 				t2 = time.time()

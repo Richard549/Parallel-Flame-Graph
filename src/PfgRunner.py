@@ -11,7 +11,8 @@ def run_pfg(
 		tracefile,
 		transformation,
 		height_display_option,
-		output_file
+		output_file,
+		x_bounds
 		):
 	
 	logging.info("Parsing the tracefile.")
@@ -36,6 +37,9 @@ def run_pfg(
 	elif transformation == TransformationOption.AGGREGATE_CALLS:
 		logging.info("Transforming tree to aggregate repeated function calls into single nodes.")	
 		tree.transform_tree_aggregate_stack_frames()
+	elif transformation == TransformationOption.MERGE_CALLS_ACROSS_CPUS:
+		logging.info("Transforming tree to aggregate sibling function calls executed on different CPUs.")	
+		tree.transform_tree_aggregate_siblings_across_cpus()
 	elif transformation == TransformationOption.VERTICAL_STACK_CPU:
 		logging.info("Transforming tree to stack CPU entities vertically.")	
 		tree.transform_tree_stack_cpu_vertically()
@@ -57,7 +61,8 @@ def run_pfg(
 		max_timestamp,
 		cpus,
 		height_display_option,
-		output_file)
+		output_file,
+		x_bounds)
 
 def transformation_option(input_string):
 	transform_option_int = 0
@@ -104,22 +109,30 @@ def parse_args():
 
 	optional.add_argument('-l', '--logfile', default="log.txt", help="Filename to output log messages (defaults to log.txt).") 
 	optional.add_argument('-d', '--log_level', type=log_level_option, default=LogLevelOption.INFO, help="Logging level. Options are:" + ll_options_str + ".")
+	optional.add_argument('-w', '--width', required=False, help="X-axis start and end given as a string a_b.")
 	optional.add_argument('--tee', action='store_true', help="Pipe logging messages to stdout as well as the log file.") 
 
 	parser._action_groups.append(optional)
 
 	args = parser.parse_args()
 
-	return args.tracefile, args.transform, args.logfile, args.log_level, args.tee, args.height_option, args.output
+	return args.tracefile, args.transform, args.logfile, args.log_level, args.tee, args.height_option, args.output, args.width
 
-tracefile, transformation_type, logfile, log_level, tee_mode, height_option, output_file = parse_args()
+tracefile, transformation_type, logfile, log_level, tee_mode, height_option, output_file, xaxis_bounds_str = parse_args()
 initialise_logging(logfile, log_level, tee_mode)
 
 logging.info("Running Parallel Flame Graph for %s", tracefile)
 logging.info("Selected transformation option was %s.", transformation_type.name)
 logging.info("Selected height display option was %s.", height_option.name)
 
-run_pfg(tracefile, transformation_type, height_option, output_file)
+if xaxis_bounds_str is not None:
+	x_start = float(xaxis_bounds_str.split("_")[0])
+	x_end = float(xaxis_bounds_str.split("_")[1])
+	bounds = [x_start,x_end]
+else:
+	bounds = None
+
+run_pfg(tracefile, transformation_type, height_option, output_file, bounds)
 
 logging.info("Done")
 
