@@ -2,7 +2,7 @@ from argparse import ArgumentParser, ArgumentTypeError
 from collections import defaultdict
 import logging
 
-from PfgTree import PFGTree, TransformationOption
+from PfgTree import PFGTree, TransformationOption, ColourMode
 from PfgTracefile import process_events
 from PfgPlotting import plot_pfg_tree, HeightDisplayOption
 from PfgUtil import initialise_logging, debug_mode, LogLevelOption
@@ -25,6 +25,7 @@ def run_pfg(
 
 	logging.info("Generating the tree.")
 	tree = PFGTree(top_level_entities)
+	tree.colour_mode = ColourMode.BY_PARALLELISM
 
 	if debug_mode():
 		logging.debug("Printing tree:")	

@@ -334,6 +334,22 @@ def plot_pfg_node(
 			optimal_cpu_cycles = ((parallelism)/len(cpus)) * interval
 			total_cpu_cycles_lost += (interval - optimal_cpu_cycles)
 		colour_identifier = total_cpu_cycles_lost
+
+		# Instead, it should be proportion of interval in parallelism, and must be independent of the interval!
+		# Or how about, average parallelism, weighted by time spent in that parallelism!
+		
+		num = 0
+		denom = 0
+		for parallelism, interval in node.node_partitions[0].parallelism_intervals.items():
+			num += parallelism*interval
+			denom += interval
+
+		# denom cannot be 0
+		weighted_arithmetic_mean_parallelism = float(num) / denom
+		logging.info("Average parallelism of %s is %f", node.node_partitions[0].name, weighted_arithmetic_mean_parallelism)
+
+		colour_identifier = weighted_arithmetic_mean_parallelism
+
 	else:
 		logging.error("Colour mode not supported.")
 		raise NotImplementedError()
@@ -346,6 +362,7 @@ def plot_pfg_node(
 		parent_identifier = str(hex(id(node.original_parent_node)))
 
 	info_text = "Total duration: " + sizeof_fmt(total_wallclock_duration) + "\n"
+	info_text += "Avg parallelism: " + str(colour_identifier) + "\n"
 	info_text += "".join([part.name + ": " + sizeof_fmt(part.wallclock_duration) + "\n" for part in node.node_partitions]) + "\n"
 	info_text += "Parent=[" + str(parent_name) + ":" + str(parent_identifier) + "]\n"
 	wallclock_durations_by_cpu = node.get_per_cpu_wallclock_durations()
@@ -376,14 +393,26 @@ def plot_pfg_node(
 		part_height = heights[part_idx]
 	
 		#facecolour = (1.0,1.0,1.0,1.0)
-		facecolour = colours(colour_values[node_colour_mapping[colour_identifier]])
 
 		if colour_mode == ColourMode.BY_PARALLELISM:
-			logging.info(node_colour_mapping)
-			mapping_list = node_colour_mapping.keys()
-			mapping_list = sorted(mapping_list)
-			colour_idx = mapping_list.index(colour_identifier)
-			facecolour = colours(colour_values[colour_idx])
+			minimum_colour = colour_values[0]
+			maximum_colour = colour_values[1]
+			value = minimum_colour + colour_identifier - 1.0
+
+			# 1.0 == minimum_colour
+			# len(cpus) == maximum_colour
+
+			# colour_identifier 
+			colour_value = maximum_colour - ((float(colour_identifier) / len(cpus)) * (maximum_colour-minimum_colour))
+			facecolour = colours(colour_value)
+						
+			#mapping_list = node_colour_mapping.keys()
+			#mapping_list = sorted(mapping_list)
+			#colour_idx = mapping_list.index(colour_identifier)
+			#facecolour = colours(colour_values[colour_idx])
+
+		else:
+			facecolour = colours(colour_values[node_colour_mapping[colour_identifier]])
 
 		logging.trace("Plotting %s on cpus %s with width %f at x=%f,y=%f", part.name, node.cpus, part_width, x0, y0)
 
@@ -430,7 +459,10 @@ def plot_pfg_tree(tree,
 	colour_values = [(i+1)*colour_step + minimum_colour for i in range(len(node_colour_mapping))]
 
 	if tree.colour_mode == ColourMode.BY_PARALLELISM:
+		# colour values should be 1.0 = minimum and len(cpus) = maximum
+		# ...
 		colour_values = list(reversed(colour_values))
+		colour_values = [minimum_colour, maximum_colour]
 	else:
 		random.shuffle(colour_values)
 

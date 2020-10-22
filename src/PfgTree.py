@@ -671,6 +671,21 @@ class PFGTree:
 					optimal_cpu_cycles = ((parallelism)/num_cpus) * interval
 					total_cpu_cycles_lost += (interval - optimal_cpu_cycles)
 				colour_identifier = total_cpu_cycles_lost
+
+				# Instead, it should be proportion of interval in parallelism, and must be independent of the interval!
+				# Or how about, average parallelism, weighted by time spent in that parallelism!
+				
+				num = 0
+				denom = 0
+				for parallelism, interval in node.node_partitions[0].parallelism_intervals.items():
+					num += parallelism*interval
+					denom += interval
+
+				# denom cannot be 0
+				weighted_arithmetic_mean_parallelism = float(num) / denom
+
+				colour_identifier = weighted_arithmetic_mean_parallelism
+
 			else:
 				logging.error("Colour mode not supported.")
 				raise NotImplementedError()

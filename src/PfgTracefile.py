@@ -616,7 +616,7 @@ def process_exit(entity, saved_call_stacks, current_call_stack_per_cpu, top_leve
 		top_of_stack = call_stack[-1]
 
 		if top_of_stack is not entity:
-			logging.error("Processing work entity exit, and it was not top of stack, so moving forward one position.")
+			logging.warning("Processing work entity exit, and it was not top of stack, so moving forward one position.")
 
 			# if it is not top of the stack, just move this exit forward and go again
 			exits[exit_idx-1] = exits[exit_idx]
@@ -818,7 +818,7 @@ def update_parallelism_intervals_on_exit(
 		#if it's not at top of stack, don't do anything
 		call_stack = saved_call_stacks[current_call_stack_per_cpu[entity.cpu][-1]]
 		if len(call_stack) == 0:
-			logging.error("Processing exit of work or sync_region, and there is no entity on top of stack")
+			logging.error("Processing exit of work, and there is no entity on top of stack")
 			raise ValueError()
 
 		top_of_stack = call_stack[-1]
