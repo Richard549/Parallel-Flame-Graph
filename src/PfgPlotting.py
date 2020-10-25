@@ -320,6 +320,12 @@ def plot_pfg_node(
 
 	edgecolour = (0.0,0.0,0.0,1.0)
 
+	parallelism_intervals_str = str(node.node_partitions[0].parallelism_intervals)
+	logging.info("%s of duration %s has intervals: %s which sum to %d", node.node_partitions[0].name, node.wallclock_durations, parallelism_intervals_str, sum(node.node_partitions[0].parallelism_intervals.values()))	
+
+	if node.wallclock_durations[0] != sum(node.node_partitions[0].parallelism_intervals.values()):
+		logging.error("%s name is bad.", node.node_partitions[0].name)
+
 	# Key to use to determine the colour of the rectangle
 	colour_identifier = "None"
 	if colour_mode == ColourMode.BY_PARENT:
@@ -388,6 +394,9 @@ def plot_pfg_node(
 		ax.rectangles[node_identifier] = [x0, total_node_width, y0, total_node_height]
 
 	for part_idx, part in enumerate(node.node_partitions):
+		if part_idx == 1:
+			logging.error("hello")
+			exit(1)
 		
 		part_width = width_to_interval_ratio * part.wallclock_duration
 		part_height = heights[part_idx]

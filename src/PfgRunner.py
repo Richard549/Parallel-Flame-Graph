@@ -3,7 +3,7 @@ from collections import defaultdict
 import logging
 
 from PfgTree import PFGTree, TransformationOption, ColourMode
-from PfgTracefile import process_events
+from PfgTracefile import process_events, count_function_calls
 from PfgPlotting import plot_pfg_tree, HeightDisplayOption
 from PfgUtil import initialise_logging, debug_mode, LogLevelOption
 
@@ -111,15 +111,16 @@ def parse_args():
 	optional.add_argument('-l', '--logfile', default="log.txt", help="Filename to output log messages (defaults to log.txt).") 
 	optional.add_argument('-d', '--log_level', type=log_level_option, default=LogLevelOption.INFO, help="Logging level. Options are:" + ll_options_str + ".")
 	optional.add_argument('-w', '--width', required=False, help="X-axis start and end given as a string a_b.")
+	optional.add_argument('--function_breakdown', action='store_true', required=False, help="Parse the tracefile and output the number of calls of each function.")
 	optional.add_argument('--tee', action='store_true', help="Pipe logging messages to stdout as well as the log file.") 
 
 	parser._action_groups.append(optional)
 
 	args = parser.parse_args()
 
-	return args.tracefile, args.transform, args.logfile, args.log_level, args.tee, args.height_option, args.output, args.width
+	return args.tracefile, args.transform, args.logfile, args.log_level, args.tee, args.height_option, args.output, args.width, args.function_breakdown
 
-tracefile, transformation_type, logfile, log_level, tee_mode, height_option, output_file, xaxis_bounds_str = parse_args()
+tracefile, transformation_type, logfile, log_level, tee_mode, height_option, output_file, xaxis_bounds_str, function_summary = parse_args()
 initialise_logging(logfile, log_level, tee_mode)
 
 logging.info("Running Parallel Flame Graph for %s", tracefile)
@@ -133,7 +134,14 @@ if xaxis_bounds_str is not None:
 else:
 	bounds = None
 
-run_pfg(tracefile, transformation_type, height_option, output_file, bounds)
+if function_summary is True:
+	function_counts = count_function_calls(tracefile)
+	logging.info("Function call breakdown:")
+	for function, number in function_counts.items():
+		logging.info("%s:%d", function, number)
+	logging.info("Done")
 
-logging.info("Done")
+else:
+	run_pfg(tracefile, transformation_type, height_option, output_file, bounds)
+	logging.info("Done")
 

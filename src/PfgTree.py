@@ -28,6 +28,9 @@ def get_durations_for_entities(
 		for cpu, cpu_interval in entity.per_cpu_intervals.items():
 			wallclock_duration_by_cpu[cpu] += cpu_interval
 
+		for cpu, extra_cpu_interval in entity.extra_duration_by_cpu.items():
+			wallclock_duration_by_cpu[cpu] += extra_cpu_interval
+
 		# Consider top of stack or whole stack?
 		# TODO make this a configurable option 
 		#for parallelism, interval in entity.top_of_stack_parallelism_intervals.items():

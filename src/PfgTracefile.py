@@ -6,6 +6,7 @@ from PfgUtil import debug_mode
 
 import logging
 import time
+import subprocess
 
 class EntityType(Enum):
 	STACKFRAME = auto()
@@ -50,6 +51,9 @@ class Entity:
 		self.parent_entity = None
 		self.child_entities = []
 
+		# i.e. duration that has been merged into this one
+		self.extra_duration_by_cpu = defaultdict(int)
+
 	def add_parallelism_interval(self, parallelism, interval, cpu):
 		self.per_cpu_intervals[cpu] += interval
 		self.parallelism_intervals[parallelism] += interval
@@ -67,8 +71,6 @@ class Entity:
 				
 		self.per_cpu_top_of_stack_parallelism_intervals[cpu][parallelism+1] += interval
 
-import subprocess
-
 def file_len(fname):
 		p = subprocess.Popen(['wc', '-l', fname], stdout=subprocess.PIPE, 
 																							stderr=subprocess.PIPE)
@@ -77,25 +79,29 @@ def file_len(fname):
 				raise IOError(err)
 		return int(result.strip().split()[0])
 
-def parse_trace(filename):
+from intervaltree import Interval, IntervalTree
 
-	logging.debug("Parsing the tracefile %s.", filename)
+def parse_trace_preprocessing(filename):
 
-	entries = []
-	exits = []
-	
-	frames = set()
-	tasks = {}
-	unique_groups = set()
-	max_depth = 0
-	max_cpu = -1
-	main_cpu = -1
-
-	min_timestamp = -1
-	max_timestamp = -1
-
+	min_timestamp = float("inf")
+	max_timestamp = -1.0
 	num_lines = file_len(filename)
+
+	max_cpu = -1
+	main_cpu = None
+	cpus = set()
+
+	state_transitions = []
+	unique_parent_frames = {} # parent_id -> tuple of (includes parallel, cpu, start, end, child frames)
 	
+	logging.debug("Loading worker state-transitions and leaf stack frames from trace for preprocessing")
+	
+	# We parse the file to get the state transitions, and build an interval tree per CPU that describes the parallelism states of that CPU
+	# On each CPU, the intervals of parallelism are guaranteed to be fully ordered
+	# Therefore, to know if a stack frame had some parallel constructs inside of it, we just test if there is > 1 intervals in the map within the stack frame
+
+	# We also collect all of the leaf stack frames, as stack frames that have no children and also do not express parallelism can immediately be merged
+
 	with open(filename, 'r') as f:
 		line_idx = -1
 		for line in f:
@@ -106,49 +112,218 @@ def parse_trace(filename):
 				continue
 
 			if line_idx % int(num_lines/10.0) == 0:
-				logging.debug("Parsed line %d of %d.", line_idx+1, num_lines)
+				logging.debug("Parsed line %d of %d (%d%%).", line_idx+1, num_lines, ((line_idx+1)/num_lines)*100.0)
+			
+			split_line = line.strip().split(",")
+
+			cpu = int(split_line[1])
+			start = int(split_line[2])
+			end = int(split_line[3])
+			
+			if cpu > max_cpu:
+				max_cpu = cpu
+
+			cpus.add(cpu)
+			if "main" in line:
+				main_cpu = cpu
+
+			if start < min_timestamp:
+				min_timestamp = start
+			if end > max_timestamp:
+				max_timestamp = end
+
+			if split_line[0] == "sync_region":
+				state_transitions.append((start, cpu, False)) # At this time, I enter non-parallel execution on this cpu
+				state_transitions.append((end, cpu, None)) # At the end time, I don't know what state I go back into
+
+			elif split_line[0] == "work":
+				state_transitions.append((start, cpu, True)) # At this time, I enter non-parallel execution on this cpu
+				state_transitions.append((end, cpu, None)) # At the end time, I don't know what state I go back into
+
+			elif split_line[0] == "stack_frame":
+
+				frame_id = split_line[4]
+				parent_frame_id = split_line[5]
+				symbol = ",".join(split_line[7:])
+
+				if parent_frame_id in unique_parent_frames:
+					unique_parent_frames[parent_frame_id][4][symbol].add(frame_id)
+				else:
+					frames_by_symbol = defaultdict(set)
+					frames_by_symbol[symbol].add(frame_id)
+					unique_parent_frames[parent_frame_id] = [None, cpu, start, end, frames_by_symbol]
+
+	# Now iterate over the state transitions and build the interval trees
+
+	state_transitions.sort(key=lambda x: x[0])
+
+	previous_time_per_cpu = {}
+	parallelism_stack_per_cpu = defaultdict(list)
+	tree_per_cpu = defaultdict(IntervalTree)
+
+	for cpu in cpus:
+		parallelism_stack_per_cpu[cpu].append(False)
+		previous_time_per_cpu[cpu] = min_timestamp
+
+	parallelism_stack_per_cpu[main_cpu][-1] = True # the main cpu starts as 'active'
+
+	for (timestamp, cpu, transition_type) in state_transitions:
+
+		# record from the previous time until now as whatever parallelism state the cpu was in (cpu value if executing, False if not executing)
+		previous_state = parallelism_stack_per_cpu[cpu][-1]
+		previous_time = previous_time_per_cpu[cpu]
+
+		if transition_type is True:
+
+			parallelism_stack_per_cpu[cpu].append(True)
+
+			if previous_state is False:
+				# going into active parallel execution, so I only need to update if the previous state was False
+				tree_per_cpu[cpu][previous_time:timestamp] = cpu if previous_state is True else False
+				previous_time_per_cpu[cpu] = timestamp
+
+		elif transition_type is False:
+
+			parallelism_stack_per_cpu[cpu].append(False)
+
+			if previous_state is True:
+				# going into a state of non-active parallel execution, so I only need to update if the previous state was True
+				tree_per_cpu[cpu][previous_time:timestamp] = cpu if previous_state is True else False
+				previous_time_per_cpu[cpu] = timestamp
+
+		elif transition_type is None:
+
+			parallelism_stack_per_cpu[cpu].pop()
+			new_state = parallelism_stack_per_cpu[cpu][-1]
+			if previous_state != new_state:
+				tree_per_cpu[cpu][previous_time:timestamp] = cpu if previous_state is True else False
+				previous_time_per_cpu[cpu] = timestamp
+	
+	del state_transitions
+
+	combined_tree = None
+	for cpu in cpus:
+		if combined_tree is None:
+			combined_tree = tree_per_cpu[cpu]
+		else:
+			combined_tree = combined_tree.union(tree_per_cpu[cpu])
+	
+	# Now iterate over the parents, and any of the child frames that are not themselves in the parent dict can be merged
+	
+	frames_to_merge = {} # parent_node_id + "_" + symbol -> set_of_frames
+
+	for parent_id, info_tuple in unique_parent_frames.items():
+
+		parent_contains_parallel_constructs = info_tuple[0]
+		cpu = info_tuple[1]
+		start = info_tuple[2]
+		end = info_tuple[3]
+		children_by_symbol = info_tuple[4]
+
+		# If it is not known, then determine it
+		if parent_contains_parallel_constructs is None:
+			parent_contains_parallel_constructs = True if len(tree_per_cpu[cpu].overlap(start, end)) > 1 else False
+			info_tuple[0] = parent_contains_parallel_constructs
+
+		for symbol, children in children_by_symbol.items():
+
+			identifier = str(parent_id) + "_" + symbol
+			set_of_frames = None
+
+			merge_all = True
+			for child_id in children:
+
+				if child_id in unique_parent_frames:
+					# it is not a leaf
+					merge_all = False
+
+					# to save rechecking the intervaltree:
+					if parent_contains_parallel_constructs is False:
+						# This means that its children also do not contain parallel constructs
+						unique_parent_frames[child_id][0] = parent_contains_parallel_constructs
+
+				elif parent_contains_parallel_constructs == False:
+					# this child is a leaf node! I should merge it with something else
+
+					if set_of_frames is None:
+						set_of_frames = set(child_id)
+					else:
+						set_of_frames.add(child_id)
+
+			if set_of_frames is not None and len(set_of_frames) > 1:
+				if merge_all:
+					frames_to_merge[identifier] = None # None meaning there is no list of frames, just merge all of them
+				else:
+					frames_to_merge[identifier] = set_of_frames
+
+	for identifier, frames in frames_to_merge.items():
+		logging.debug("The parent %s will have its %s frames merged. This will be %s of them.", identifier.split("_")[0], "_".join(identifier.split("_")[1:]), "all" if frames is None else str(len(frames)))
+
+	return combined_tree, frames_to_merge, max_cpu, main_cpu, min_timestamp, max_timestamp
+
+def parse_trace(filename,
+		work_tree,
+		merged_leaf_parents):
+
+	logging.debug("Parsing the tracefile %s.", filename)
+
+	entries = []
+	exits = []
+	
+	tasks = {}
+	unique_groups = set()
+	merged_base_frames = {} # merge_identifier -> base frame
+
+	num_lines = file_len(filename)
+
+	with open(filename, 'r') as f:
+		line_idx = -1
+		for line in f:
+
+			line_idx += 1
+
+			if line.strip() == "":
+				continue
+
+			if line_idx % int(num_lines/10.0) == 0:
+				logging.debug("Parsed line %d of %d (%d%%).", line_idx+1, num_lines, ((line_idx+1)/num_lines)*100.0)
 
 			split_line = line.strip().split(",")
 			cpu = int(split_line[1])
 
-			if cpu > max_cpu:
-				max_cpu = cpu
+			if split_line[0] == "stack_frame":
 
-			if split_line[0] == "period": # i.e. stack frame period!
-
-				period_start = int(split_line[2])
-				period_end = int(split_line[3])
 				frame_id = split_line[4]
 				parent_frame_id = split_line[5]
 
-				frame_start = int(split_line[6])
-				frame_end = int(split_line[7])
+				frame_start = int(split_line[2])
+				frame_end = int(split_line[3])
 
-				if min_timestamp == -1 or frame_start < min_timestamp:
-					min_timestamp = frame_start
-				if max_timestamp == -1 or frame_end > max_timestamp:
-					max_timestamp = frame_end
-
-				depth = int(split_line[8])
-				symbol = ",".join(split_line[9:])
+				depth = int(split_line[6])
+				symbol = ",".join(split_line[7:])
 
 				# ignoring openmp outlining function calls
 				if "outlined" in symbol:
 					continue
 				
-				if "main" in symbol and main_cpu == -1:
-					main_cpu = cpu
-
 				if symbol not in unique_groups:
 					unique_groups.add(symbol)
 
-				if frame_id in frames:
-					# This is a period of a frame we've seen before, for now I can just ignore it
-					pass
+				# check if this is a merged frame
+				should_merge = False
+				identifier = str(parent_frame_id) + "_" + symbol
+				if identifier in merged_leaf_parents:
+					frames_to_merge = merged_leaf_parents[identifier]
 
-				else:
-					# This is a period of a new frame!
-					frames.add(frame_id)
+					if frames_to_merge is None:
+						should_merge = True
+					else:
+						if frame_id in frames_to_merge:
+							should_merge = True
+
+				# I need to create the entity if I am not being merged,
+				# or I am the first one to merge (i.e. the base frame)
+				if (should_merge is False) or (should_merge is True and identifier not in merged_base_frames): 
 
 					stack_frame = Entity(EntityType.STACKFRAME, frame_id, cpu, frame_start, frame_end)
 					stack_frame.depth = depth
@@ -157,6 +332,18 @@ def parse_trace(filename):
 
 					entries.append(stack_frame)
 					exits.append(stack_frame)
+
+					if should_merge is True:
+						merged_base_frames[identifier] = stack_frame
+
+				else:
+
+					base_frame = merged_base_frames[identifier]
+					# I need to add the duration of the new frame to the one point at by base_frame_id
+
+					base_frame.extra_duration_by_cpu[cpu] += (frame_end - frame_start)
+
+					# I also need to add the correct parallelism interval to the base frame by parsing the combined tree...
 
 			elif split_line[0] == "task_creation":
 				continue # currently ignoring
@@ -299,7 +486,7 @@ def parse_trace(filename):
 
 	logging.debug("Finished parsing the tracefile %s.", filename)
 
-	return entries, exits, unique_groups, max_cpu, main_cpu, min_timestamp, max_timestamp
+	return entries, exits, unique_groups
 
 def get_next_entity(entries, exits, entry_idx, exit_idx):
 
@@ -963,7 +1150,9 @@ def process_events(filename):
 	# sort the events by time
 	# then iterate over each event, processing them according to their type
 
-	entries, exits, unique_groups, max_cpu, main_cpu, min_timestamp, max_timestamp = parse_trace(filename)
+	work_tree, merged_leaf_parents, max_cpu, main_cpu, min_timestamp, max_timestamp = parse_trace_preprocessing(filename)
+
+	entries, exits, unique_groups = parse_trace(filename, work_tree, merged_leaf_parents)
 
 	# Every task must have its own callstack that it works on
 	# When it creates a task, it copies its callstack over to the new task
@@ -1098,3 +1287,25 @@ def process_events(filename):
 		logging.debug("Total exit processing time: %f", total_process_exit_time)
 
 	return top_level_entities, unique_groups, max_depth[0], min_timestamp, max_timestamp, unique_cpus
+
+def count_function_calls(filename):
+
+	function_counts = defaultdict(int)
+
+	with open(filename, 'r') as f:
+		for line in f:
+
+			if line.strip() == "":
+				continue
+
+			split_line = line.strip().split(",")
+			cpu = int(split_line[1])
+
+			if split_line[0] == "stack_frame":
+
+				frame_id = split_line[4]
+				symbol = ",".join(split_line[7:])
+
+				function_counts[symbol] += 1
+
+	return function_counts
