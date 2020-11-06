@@ -2,7 +2,7 @@ from enum import Enum, auto
 from copy import copy
 from collections import defaultdict
 
-from PfgUtil import debug_mode
+from PfgUtil import debug_mode, sizeof_fmt
 
 import logging
 import time
@@ -44,6 +44,8 @@ class Entity:
 
 		self.parallelism_intervals = defaultdict(int)
 		self.per_cpu_intervals = defaultdict(int)
+		self.per_cpu_active_intervals = defaultdict(int)
+
 		self.per_cpu_top_of_stack_intervals = defaultdict(int)
 		self.top_of_stack_parallelism_intervals = defaultdict(int)
 		self.per_cpu_top_of_stack_parallelism_intervals = {}
@@ -161,17 +163,26 @@ def parse_trace_preprocessing(filename):
 	parallelism_stack_per_cpu = defaultdict(list)
 	tree_per_cpu = defaultdict(IntervalTree)
 
+	parallelism_tree = IntervalTree()
+	previous_timestamp_cross_cpu_processing = min_timestamp
+
 	for cpu in cpus:
 		parallelism_stack_per_cpu[cpu].append(False)
 		previous_time_per_cpu[cpu] = min_timestamp
 
 	parallelism_stack_per_cpu[main_cpu][-1] = True # the main cpu starts as 'active'
-
+	
 	for (timestamp, cpu, transition_type) in state_transitions:
 
 		# record from the previous time until now as whatever parallelism state the cpu was in (cpu value if executing, False if not executing)
 		previous_state = parallelism_stack_per_cpu[cpu][-1]
 		previous_time = previous_time_per_cpu[cpu]
+
+		# count all states to determine parallelism during this interval
+		if timestamp > previous_timestamp_cross_cpu_processing: # check in case two transitions happen simultaneously
+			number_cpus_in_parallel_work = sum([1 if stack[-1] is True else 0 for cpu, stack in parallelism_stack_per_cpu.items()])
+			parallelism_tree[previous_timestamp_cross_cpu_processing:timestamp] = number_cpus_in_parallel_work
+			previous_timestamp_cross_cpu_processing = timestamp
 
 		if transition_type is True:
 
@@ -198,16 +209,16 @@ def parse_trace_preprocessing(filename):
 			if previous_state != new_state:
 				tree_per_cpu[cpu][previous_time:timestamp] = cpu if previous_state is True else False
 				previous_time_per_cpu[cpu] = timestamp
+
+	# Finish the main cpu's activity:
+	tree_per_cpu[main_cpu][previous_time_per_cpu[main_cpu]:max_timestamp] = main_cpu
+	
+	# This should be 1, but calculate it anyway
+	number_cpus_in_parallel_work = sum([1 if stack[-1] is True else 0 for cpu, stack in parallelism_stack_per_cpu.items()])
+	parallelism_tree[previous_timestamp_cross_cpu_processing:max_timestamp] = number_cpus_in_parallel_work
 	
 	del state_transitions
 
-	combined_tree = None
-	for cpu in cpus:
-		if combined_tree is None:
-			combined_tree = tree_per_cpu[cpu]
-		else:
-			combined_tree = combined_tree.union(tree_per_cpu[cpu])
-	
 	# Now iterate over the parents, and any of the child frames that are not themselves in the parent dict can be merged
 	
 	frames_to_merge = {} # parent_node_id + "_" + symbol -> set_of_frames
@@ -259,10 +270,11 @@ def parse_trace_preprocessing(filename):
 	for identifier, frames in frames_to_merge.items():
 		logging.debug("The parent %s will have its %s frames merged. This will be %s of them.", identifier.split("_")[0], "_".join(identifier.split("_")[1:]), "all" if frames is None else str(len(frames)))
 
-	return combined_tree, frames_to_merge, max_cpu, main_cpu, min_timestamp, max_timestamp
+	return tree_per_cpu, parallelism_tree, frames_to_merge, max_cpu, main_cpu, min_timestamp, max_timestamp
 
 def parse_trace(filename,
-		work_tree,
+		parallelism_tree,
+		work_tree_per_cpu,
 		merged_leaf_parents):
 
 	logging.debug("Parsing the tracefile %s.", filename)
@@ -309,6 +321,48 @@ def parse_trace(filename,
 				if symbol not in unique_groups:
 					unique_groups.add(symbol)
 
+				# per_cpu_intervals[4] = total time spent-on-stack on CPU 4
+				# per_cpu_active_intervals[4] = total time spent in work on CPU 4 (i.e. not in OpenMP synchronization)
+				# parallelism_intervals[4] = time spent running on 4 CPUs
+
+				cpu_interval = frame_end - frame_start # this is how long it was on the stack
+
+				active_cpu_interval = 0
+				for work_interval in sorted(work_tree_per_cpu[cpu].overlap(frame_start, frame_end)):
+
+					if work_interval[2] is False:
+						continue
+
+					if frame_start >= work_interval[0] and frame_end <= work_interval[1]:
+						# the frame is entirely enveloped in this work interval
+						active_cpu_interval += (frame_end - frame_start)
+					elif frame_start < work_interval[0] and frame_end <= work_interval[1]:
+						# the frame starts before the work interval, and ends during it
+						active_cpu_interval += (frame_end - work_interval[0])
+					elif frame_start >= work_interval[0] and frame_end > work_interval[1]:
+						# the frame starts during the work interval, and ends after it
+						active_cpu_interval += (work_interval[1] - frame_start)
+					elif frame_start < work_interval[0] and frame_end > work_interval[1]:
+						# the work interval is entirely enveloped in this frame
+						active_cpu_interval += (work_interval[1] - work_interval[0])
+
+					# we know that the interval overlaps, so we don't need to test if (start and end) are both before or both after
+
+				parallelism_intervals = defaultdict(int)
+				for interval in sorted(parallelism_tree.overlap(frame_start,frame_end)):
+					parallelism = interval[2]
+
+					start = interval[0]
+					if frame_start > interval[0]:
+						start = frame_start
+
+					end = interval[1]
+					if frame_end < interval[1]:
+						end = frame_end
+
+					duration = end - start
+					parallelism_intervals[parallelism] += duration
+
 				# check if this is a merged frame
 				should_merge = False
 				identifier = str(parent_frame_id) + "_" + symbol
@@ -320,6 +374,8 @@ def parse_trace(filename,
 					else:
 						if frame_id in frames_to_merge:
 							should_merge = True
+
+				stack_frame = None
 
 				# I need to create the entity if I am not being merged,
 				# or I am the first one to merge (i.e. the base frame)
@@ -337,14 +393,15 @@ def parse_trace(filename,
 						merged_base_frames[identifier] = stack_frame
 
 				else:
+					# add the intervals to the base frame
+					stack_frame = merged_base_frames[identifier]
 
-					base_frame = merged_base_frames[identifier]
-					# I need to add the duration of the new frame to the one point at by base_frame_id
+				stack_frame.per_cpu_intervals[cpu] += cpu_interval
+				stack_frame.per_cpu_active_intervals[cpu] += active_cpu_interval
 
-					base_frame.extra_duration_by_cpu[cpu] += (frame_end - frame_start)
-
-					# I also need to add the correct parallelism interval to the base frame by parsing the combined tree...
-
+				for parallelism, interval in parallelism_intervals.items():
+					stack_frame.parallelism_intervals[parallelism] += interval
+				
 			elif split_line[0] == "task_creation":
 				continue # currently ignoring
 				
@@ -474,6 +531,53 @@ def parse_trace(filename,
 				work.count = int(split_line[5]) # number of threads in the work team
 				entries.append(work)
 				exits.append(work)
+
+				# determine the intervals
+
+				cpu_interval = end - start
+
+				active_cpu_interval = 0
+				for work_interval in sorted(work_tree_per_cpu[cpu].overlap(start, end)):
+					logging.info(work_interval)
+
+					if work_interval[2] is False:
+						continue
+
+					if start >= work_interval[0] and end <= work_interval[1]:
+						# the frame is entirely enveloped in this work interval
+						active_cpu_interval += (end - start)
+					elif start < work_interval[0] and end <= work_interval[1]:
+						# the frame starts before the work interval, and ends during it
+						active_cpu_interval += (end - work_interval[0])
+					elif start >= work_interval[0] and end > work_interval[1]:
+						# the frame starts during the work interval, and ends after it
+						active_cpu_interval += (work_interval[1] - start)
+					elif start < work_interval[0] and end > work_interval[1]:
+						# the work interval is entirely enveloped in this frame
+						active_cpu_interval += (work_interval[1] - work_interval[0])
+	
+					# we know that the interval overlaps, so we don't need to test if (start and end) are both before or both after
+
+				parallelism_intervals = defaultdict(int)
+				for interval in sorted(parallelism_tree.overlap(start,end)):
+					parallelism = interval[2]
+
+					start_temp = interval[0]
+					if start > interval[0]:
+						start_temp = start
+
+					end_temp = interval[1]
+					if end < interval[1]:
+						end_temp = end
+
+					duration = end_temp - start_temp
+					parallelism_intervals[parallelism] += duration
+
+				work.per_cpu_intervals[cpu] += cpu_interval
+				work.per_cpu_active_intervals[cpu] += active_cpu_interval
+
+				for parallelism, interval in parallelism_intervals.items():
+					work.parallelism_intervals[parallelism] += interval
 
 			else:
 				logging.error("Cannot parse line: %s", line);
@@ -1150,9 +1254,8 @@ def process_events(filename):
 	# sort the events by time
 	# then iterate over each event, processing them according to their type
 
-	work_tree, merged_leaf_parents, max_cpu, main_cpu, min_timestamp, max_timestamp = parse_trace_preprocessing(filename)
-
-	entries, exits, unique_groups = parse_trace(filename, work_tree, merged_leaf_parents)
+	work_tree_per_cpu, parallelism_tree, merged_leaf_parents, max_cpu, main_cpu, min_timestamp, max_timestamp = parse_trace_preprocessing(filename)
+	entries, exits, unique_groups = parse_trace(filename, parallelism_tree, work_tree_per_cpu, merged_leaf_parents)
 
 	# Every task must have its own callstack that it works on
 	# When it creates a task, it copies its callstack over to the new task
@@ -1215,6 +1318,7 @@ def process_events(filename):
 			if debug_mode():
 				t0 = time.time()
 
+			'''
 			current_parallelism, current_processed_time = update_parallelism_intervals_on_entry(next_entity,
 				saved_call_stacks,
 				current_call_stack_per_cpu,
@@ -1222,6 +1326,7 @@ def process_events(filename):
 				current_parallelism,
 				current_processed_times_per_cpu,
 				main_cpu)
+			'''
 
 			if debug_mode():
 				t1 = time.time()
@@ -1251,6 +1356,7 @@ def process_events(filename):
 			if debug_mode():
 				t0 = time.time()
 
+			'''
 			current_parallelism, current_processed_time = update_parallelism_intervals_on_exit(next_entity,
 				saved_call_stacks,
 				current_call_stack_per_cpu,
@@ -1258,6 +1364,7 @@ def process_events(filename):
 				current_parallelism,
 				current_processed_times_per_cpu,
 				main_cpu)
+			'''
 
 			if debug_mode():
 				t1 = time.time()

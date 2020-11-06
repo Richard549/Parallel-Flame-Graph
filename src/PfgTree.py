@@ -3,7 +3,7 @@ from enum import Enum, auto
 import logging
 import numpy as np
 
-from PfgUtil import debug_mode
+from PfgUtil import debug_mode, sizeof_fmt
 
 class TransformationOption(Enum):
 	NONE = auto()
@@ -22,14 +22,17 @@ def get_durations_for_entities(
 		):
 
 	wallclock_duration_by_cpu = defaultdict(int)
+	active_wallclock_duration_by_cpu = defaultdict(int)
 	parallelism_intervals = defaultdict(int)
 	for entity in entities:
 
 		for cpu, cpu_interval in entity.per_cpu_intervals.items():
 			wallclock_duration_by_cpu[cpu] += cpu_interval
+		for cpu, cpu_interval in entity.per_cpu_active_intervals.items():
+			active_wallclock_duration_by_cpu[cpu] += cpu_interval
 
-		for cpu, extra_cpu_interval in entity.extra_duration_by_cpu.items():
-			wallclock_duration_by_cpu[cpu] += extra_cpu_interval
+		#for cpu, extra_cpu_interval in entity.extra_duration_by_cpu.items():
+		#	wallclock_duration_by_cpu[cpu] += extra_cpu_interval
 
 		# Consider top of stack or whole stack?
 		# TODO make this a configurable option 
@@ -39,16 +42,19 @@ def get_durations_for_entities(
 	
 	cpus = []
 	wallclock_durations = []
+	active_wallclock_durations = []
 	for cpu, duration in wallclock_duration_by_cpu.items():
 		cpus.append(cpu)
 		wallclock_durations.append(duration)
+		active_wallclock_durations.append(active_wallclock_duration_by_cpu[cpu])
 
 	if len(cpus) > 1:
 		sorted_indices = np.argsort(wallclock_durations)[::-1]
 		wallclock_durations = np.array(wallclock_durations)[sorted_indices].tolist()
+		active_wallclock_durations = np.array(active_wallclock_durations)[sorted_indices].tolist()
 		cpus = np.array(cpus)[sorted_indices].tolist()
 
-	return cpus, wallclock_durations, parallelism_intervals
+	return cpus, wallclock_durations, parallelism_intervals, active_wallclock_durations
 
 """
 	This is what will actually be plotted as a sub-bar
@@ -137,7 +143,7 @@ class PFGTreeNode:
 
 		wallclock_durations_by_group = defaultdict(int)
 		cpu_time_by_group = defaultdict(int)
-		parallelism_intervals_by_group = {}
+		parallelism_intervals_by_group = defaultdict(lambda: defaultdict(int))
 		for execution_interval in self.execution_intervals:
 
 			if cpu_time == True or execution_interval.cpu == self.cpus[0]:
@@ -146,10 +152,8 @@ class PFGTreeNode:
 			if execution_interval.cpu not in self.cpus:
 				self.cpus.append(execution_interval.cpu)
 
-				for parallelism, interval in execution_interval.parallelism_intervals.items():
-					parallelism_intervals_by_group[execution_interval.name][parallelism] += interval 
-			else:
-				parallelism_intervals_by_group[execution_interval.name] = execution_interval.parallelism_intervals
+			for parallelism, interval in execution_interval.parallelism_intervals.items():
+				parallelism_intervals_by_group[execution_interval.name][parallelism] += interval 
 
 			cpu_time_by_group[execution_interval.name] += execution_interval.duration
 
@@ -167,8 +171,12 @@ class PFGTreeNode:
 
 			total_wallclock_duration += duration
 			self.node_partitions.append(part)
+		
+			#for parallelism, cpu_time in parallelism_intervals_for_group.items():
+			#	self.parallelism_intervals[parallelism] += cpu_time
 
 		self.wallclock_durations[0] = total_wallclock_duration
+
 		
 	# Return the durations over all intervals. For each CPU, we assume the intervals occur sequentially is wallclock.
 	# TODO fix what happens in a recursive function, where one CPU calls a function many times - the wallclocks of these functions will be summed!
@@ -229,7 +237,9 @@ class PFGTree:
 					for entity in entities_for_group:
 
 						entity_as_list = [entity]
-						cpus, wallclock_durations, parallelism_intervals = get_durations_for_entities(entity_as_list)
+						cpus, wallclock_durations, parallelism_intervals, active_wallclock_durations = get_durations_for_entities(entity_as_list)
+
+						logging.info("Got %s from entity %s of group %s", wallclock_durations, entity.identifier, group)
 
 						node = PFGTreeNode(
 							parent_node=parent_node,
@@ -240,13 +250,14 @@ class PFGTree:
 							depth=depth
 							)
 
+						node.active_wallclock_durations = active_wallclock_durations
 						parent_node_list.append(node)
 
 						if len(entity.child_entities) > 0:
 							self.gen_tree_process_entities_into_child_nodes(node, entity.child_entities, node.child_nodes, depth+1, aggregate_stack_frames_by_default)		
 
 				else:
-					cpus, wallclock_durations, parallelism_intervals = get_durations_for_entities(entities_for_group)
+					cpus, wallclock_durations, parallelism_intervals, active_wallclock_durations = get_durations_for_entities(entities_for_group)
 
 					node = PFGTreeNode(
 						parent_node=parent_node,
@@ -257,6 +268,7 @@ class PFGTree:
 						depth=depth
 						)
 
+					node.active_wallclock_durations = active_wallclock_durations
 					parent_node_list.append(node)
 		
 					# collect all children of these entities, and convert them to nodes
@@ -300,6 +312,12 @@ class PFGTree:
 
 					# Because we are merging intra-CPU, there is no need to sort them to ensure we retain maximum wallclock
 					merged_node = self.merge_node_set(nodes)
+
+					node = merged_node
+					if node.wallclock_durations[0] != sum(node.node_partitions[0].parallelism_intervals.values()):
+						logging.error("%s name is bad.", node.node_partitions[0].name)
+						exit(0)
+
 					node_sets_queue.append(merged_node.child_nodes)
 
 			node_sets_queue.pop(0)
@@ -330,6 +348,11 @@ class PFGTree:
 
 				# Because we are merging intra-CPU, there is no need to sort them to ensure we retain maximum wallclock
 				merged_node = self.merge_node_set(nodes)
+
+				if node.wallclock_durations[0] != sum(node.node_partitions[0].parallelism_intervals.values()):
+					logging.error("%s name is bad.", node.node_partitions[0].name)
+					exit(0)
+
 				node_sets_queue.append(merged_node.child_nodes)
 
 			node_sets_queue.pop(0)
@@ -349,14 +372,44 @@ class PFGTree:
 			sibling_nodes = node_sets_queue[0]
 
 			sibling_nodes_by_group = defaultdict(list)
+			unique_cpus = set()
 			for node in sibling_nodes:
+				for interval in node.execution_intervals:
+					unique_cpus.add(interval.cpu)
 				sibling_nodes_by_group[node.node_partitions[0].name].append(node)
 
 			# Now merge all of the siblings into one node, regardless of cpu
-			for group, nodes in sibling_nodes_by_group.items():
 
-				# We do need to sort so that the CPU that took the longest to execute the function defines the wallclock
-				merged_node = self.merge_node_set(nodes, True)
+			total_duration_by_cpu = defaultdict(int)
+			for group, nodes in sibling_nodes_by_group.items():
+				for node in nodes:
+					# if the node is sequential, then we should add its duration to all CPUs
+					if len(node.execution_intervals) == 1:
+						for cpu in unique_cpus:
+							total_duration_by_cpu[cpu] += node.wallclock_durations[0]
+					else:
+						total_duration_by_cpu[node.cpus[0]] += node.wallclock_durations[0]
+			
+			highest_total_duration_cpu = 0
+			highest_total_duration = 0
+			for cpu, total_duration in total_duration_by_cpu.items():
+				if total_duration > highest_total_duration:
+					highest_total_duration = total_duration
+					highest_total_duration_cpu = cpu
+
+			for group, nodes in sibling_nodes_by_group.items():
+				
+				# ensure the first node in nodes is the one from highest_total_duration_cpu
+				nodes_reordered = [node for node in nodes if node.cpus[0] == highest_total_duration_cpu]
+				nodes_reordered.extend([node for node in nodes if node.cpus[0] != highest_total_duration_cpu])				
+
+				# We can't sort here, because if there are multiple sibling groups, we might end up taking the longest version
+				# of each child, which combined may be longer than the parent!
+				# So, we need to find the cpu with the longest combined duration and use that
+				# The problem is: that CPU might have a sibling split that is non-representative
+				
+				merged_node = self.merge_node_set(nodes_reordered, False)
+
 				node_sets_queue.append(merged_node.child_nodes)
 
 			node_sets_queue.pop(0)

@@ -320,12 +320,6 @@ def plot_pfg_node(
 
 	edgecolour = (0.0,0.0,0.0,1.0)
 
-	parallelism_intervals_str = str(node.node_partitions[0].parallelism_intervals)
-	logging.info("%s of duration %s has intervals: %s which sum to %d", node.node_partitions[0].name, node.wallclock_durations, parallelism_intervals_str, sum(node.node_partitions[0].parallelism_intervals.values()))	
-
-	if node.wallclock_durations[0] != sum(node.node_partitions[0].parallelism_intervals.values()):
-		logging.error("%s name is bad.", node.node_partitions[0].name)
-
 	# Key to use to determine the colour of the rectangle
 	colour_identifier = "None"
 	if colour_mode == ColourMode.BY_PARENT:
@@ -352,7 +346,6 @@ def plot_pfg_node(
 
 		# denom cannot be 0
 		weighted_arithmetic_mean_parallelism = float(num) / denom
-		logging.info("Average parallelism of %s is %f", node.node_partitions[0].name, weighted_arithmetic_mean_parallelism)
 
 		colour_identifier = weighted_arithmetic_mean_parallelism
 
@@ -406,20 +399,13 @@ def plot_pfg_node(
 		if colour_mode == ColourMode.BY_PARALLELISM:
 			minimum_colour = colour_values[0]
 			maximum_colour = colour_values[1]
-			value = minimum_colour + colour_identifier - 1.0
+			value = minimum_colour + colour_identifier
 
-			# 1.0 == minimum_colour
-			# len(cpus) == maximum_colour
+			# Choose between darker red = poor parallelism (first line) or darker_red = high parallelism (second line)
+			#colour_value = maximum_colour - ((float(colour_identifier) / len(cpus)) * (maximum_colour-minimum_colour))
+			colour_value = minimum_colour + ((float(colour_identifier) / len(cpus)) * (maximum_colour-minimum_colour))
 
-			# colour_identifier 
-			colour_value = maximum_colour - ((float(colour_identifier) / len(cpus)) * (maximum_colour-minimum_colour))
 			facecolour = colours(colour_value)
-						
-			#mapping_list = node_colour_mapping.keys()
-			#mapping_list = sorted(mapping_list)
-			#colour_idx = mapping_list.index(colour_identifier)
-			#facecolour = colours(colour_values[colour_idx])
-
 		else:
 			facecolour = colours(colour_values[node_colour_mapping[colour_identifier]])
 
@@ -461,16 +447,12 @@ def plot_pfg_tree(tree,
 	# There should be a colour for each 'original parent'
 	node_colour_mapping = tree.assign_colour_indexes_to_nodes(tree.root_nodes, len(cpus))
 
-	maximum_colour = 0.65;
-	#minimum_colour = 0.05;
+	maximum_colour = 0.75;
 	minimum_colour = 0.00;
 	colour_step = (maximum_colour-minimum_colour)/len(node_colour_mapping)
 	colour_values = [(i+1)*colour_step + minimum_colour for i in range(len(node_colour_mapping))]
 
 	if tree.colour_mode == ColourMode.BY_PARALLELISM:
-		# colour values should be 1.0 = minimum and len(cpus) = maximum
-		# ...
-		colour_values = list(reversed(colour_values))
 		colour_values = [minimum_colour, maximum_colour]
 	else:
 		random.shuffle(colour_values)
