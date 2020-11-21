@@ -50,6 +50,8 @@ class Entity:
 		self.top_of_stack_parallelism_intervals = defaultdict(int)
 		self.per_cpu_top_of_stack_parallelism_intervals = {}
 
+		self.per_cpu_event_values = defaultdict(lambda: defaultdict(int))
+
 		self.parent_entity = None
 		self.child_entities = []
 
@@ -72,6 +74,9 @@ class Entity:
 			self.per_cpu_top_of_stack_parallelism_intervals[cpu] = defaultdict(int)
 				
 		self.per_cpu_top_of_stack_parallelism_intervals[cpu][parallelism+1] += interval
+
+	def add_event_value(self, cpu, event_idx, value):
+		self.per_cpu_event_values[cpu][event_idx] += value
 
 def file_len(fname):
 		p = subprocess.Popen(['wc', '-l', fname], stdout=subprocess.PIPE, 
@@ -119,6 +124,10 @@ def parse_trace_preprocessing(filename):
 			split_line = line.strip().split(",")
 
 			cpu = int(split_line[1])
+			
+			if split_line[0] == "counter_description":
+				continue
+
 			start = int(split_line[2])
 			end = int(split_line[3])
 			
@@ -285,6 +294,11 @@ def parse_trace(filename,
 	tasks = {}
 	unique_groups = set()
 	merged_base_frames = {} # merge_identifier -> base frame
+	frames = {}
+
+	counters = {}
+	derived_counters = {}
+	duration_counter = "PAPI_TOT_CYC" # for calculating event-rates
 
 	num_lines = file_len(filename)
 
@@ -302,6 +316,9 @@ def parse_trace(filename,
 
 			split_line = line.strip().split(",")
 			cpu = int(split_line[1])
+
+			# Assuming that counter_descriptions preceed all stack_frame_periods
+			# Assuming that stack_frames on CPU x preceed all stack_frame_periods on CPU x
 
 			if split_line[0] == "stack_frame":
 
@@ -391,6 +408,9 @@ def parse_trace(filename,
 
 					if should_merge is True:
 						merged_base_frames[identifier] = stack_frame
+					
+					if frame_id not in frames:
+						frames[frame_id] = stack_frame
 
 				else:
 					# add the intervals to the base frame
@@ -401,6 +421,58 @@ def parse_trace(filename,
 
 				for parallelism, interval in parallelism_intervals.items():
 					stack_frame.parallelism_intervals[parallelism] += interval
+
+			elif split_line[0] == "period":
+				
+				counter_value_offset = 9
+
+				frame_id = split_line[4]
+				parent_frame_id = split_line[5]
+				symbol = ",".join(split_line[counter_value_offset+len(counters):])
+				
+				# ignoring openmp outlining function calls
+				if "outlined" in symbol:
+					continue
+
+				if frame_id not in frames:
+					identifier = str(parent_frame_id) + "_" + symbol
+
+					if identifier not in merged_base_frames:
+						logging.error("Identifier was not found in the merged frames list")
+						logging.error(line)
+						exit(1)
+
+					frame = merged_base_frames[identifier]
+				else:
+					frame = frames[frame_id]
+
+				for event_idx, event in counters.items():
+					value = int(split_line[counter_value_offset + event_idx])
+					frame.add_event_value(cpu, event_idx, value)
+
+				# now do the dervied ones! assuming we have the duration counter
+				if duration_counter in counters.values():
+					duration_counter_idx = list(counters.values()).index(duration_counter)
+					duration_counter_value = int(split_line[counter_value_offset + duration_counter_idx])
+
+					for event_idx, event in counters.items():
+						if event != duration_counter:
+
+							rate_name = event + "_RATE"
+							rate_event_idx = list(derived_counters.values()).index(rate_name) + len(counters)
+							
+							value = int(float(split_line[counter_value_offset + event_idx]) / float(duration_counter_value))
+							frame.add_event_value(cpu, rate_event_idx, value)
+			
+			elif split_line[0] == "counter_description":
+
+				# counter_description,0,PAPI_TOT_INS
+				counters[int(split_line[1])] = split_line[2]
+
+				if split_line[2] != duration_counter:
+					rate_name = split_line[2] + "_RATE"
+					rate_event_idx = len(derived_counters)
+					derived_counters[rate_event_idx] = rate_name
 				
 			elif split_line[0] == "task_creation":
 				continue # currently ignoring
@@ -578,6 +650,25 @@ def parse_trace(filename,
 
 				for parallelism, interval in parallelism_intervals.items():
 					work.parallelism_intervals[parallelism] += interval
+				
+				counter_value_offset = 6
+				for event_idx, event in counters.items():
+					value = int(split_line[counter_value_offset + event_idx])
+					work.add_event_value(cpu, event_idx, value)
+				
+				# now do the dervied ones! assuming we have the duration counter
+				if duration_counter in counters.values():
+					duration_counter_idx = list(counters.values()).index(duration_counter)
+					duration_counter_value = int(split_line[counter_value_offset + duration_counter_idx])
+
+					for event_idx, event in counters.items():
+						if event != duration_counter:
+
+							rate_name = event + "_RATE"
+							rate_event_idx = list(derived_counters.values()).index(rate_name) + len(counters)
+							
+							value = float(split_line[counter_value_offset + event_idx]) / float(duration_counter_value)
+							work.add_event_value(cpu, rate_event_idx, value)
 
 			else:
 				logging.error("Cannot parse line: %s", line);
@@ -590,7 +681,13 @@ def parse_trace(filename,
 
 	logging.debug("Finished parsing the tracefile %s.", filename)
 
-	return entries, exits, unique_groups
+	logging.info(counters)
+	num_base_counters = len(counters)
+	for derived_counter_idx, counter in derived_counters.items():
+		counters[num_base_counters + derived_counter_idx] = counter
+	logging.info(counters)
+
+	return entries, exits, unique_groups, counters
 
 def get_next_entity(entries, exits, entry_idx, exit_idx):
 
@@ -1255,7 +1352,7 @@ def process_events(filename):
 	# then iterate over each event, processing them according to their type
 
 	work_tree_per_cpu, parallelism_tree, merged_leaf_parents, max_cpu, main_cpu, min_timestamp, max_timestamp = parse_trace_preprocessing(filename)
-	entries, exits, unique_groups = parse_trace(filename, parallelism_tree, work_tree_per_cpu, merged_leaf_parents)
+	entries, exits, unique_groups, counters = parse_trace(filename, parallelism_tree, work_tree_per_cpu, merged_leaf_parents)
 
 	# Every task must have its own callstack that it works on
 	# When it creates a task, it copies its callstack over to the new task
@@ -1393,7 +1490,7 @@ def process_events(filename):
 		logging.debug("Total entry processing time: %f", total_process_entry_time)
 		logging.debug("Total exit processing time: %f", total_process_exit_time)
 
-	return top_level_entities, unique_groups, max_depth[0], min_timestamp, max_timestamp, unique_cpus
+	return top_level_entities, unique_groups, max_depth[0], min_timestamp, max_timestamp, unique_cpus, counters
 
 def count_function_calls(filename):
 

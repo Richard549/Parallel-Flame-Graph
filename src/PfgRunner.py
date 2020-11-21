@@ -21,7 +21,8 @@ def run_pfg(
 		max_depth,
 		min_timestamp,
 		max_timestamp,
-		cpus) = process_events(tracefile)
+		cpus,
+		counters) = process_events(tracefile)
 
 	logging.info("Generating the tree.")
 	tree = PFGTree(top_level_entities)
@@ -63,7 +64,8 @@ def run_pfg(
 		cpus,
 		height_display_option,
 		output_file,
-		x_bounds)
+		x_bounds,
+		counters)
 
 def transformation_option(input_string):
 	transform_option_int = 0

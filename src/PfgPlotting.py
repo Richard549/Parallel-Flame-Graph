@@ -237,6 +237,29 @@ class PFGBarText:
 
 		self.text_box.figure.canvas.draw()
 
+def onpick(event):
+	art = event.artist
+	if event.mouseevent.inaxes is not None:
+		ax = event.mouseevent.inaxes
+		if art in ax.counters_line_map:
+			selected_counter = ax.counters_line_map[art]
+
+			if ax.selected_counter == selected_counter:
+				return
+			
+			for handle_idx, handle in enumerate(ax.legend.legendHandles):
+				if handle_idx == selected_counter:
+					handle.set_color('red')
+				else:
+					handle.set_color('none')
+
+			for rect in ax.plotted_bars:
+				rect.set_facecolor(rect.colour_options[selected_counter])
+
+			ax.selected_counter = selected_counter
+			ax.figure.canvas.draw()
+
+
 """
 	If width is wallclock, height may be relative to CPU-time, or parallel inefficiency, etc
 """
@@ -309,7 +332,8 @@ def plot_pfg_node(
 		colour_values,
 		cpus,
 		node_colour_mapping,
-		colour_mode
+		colour_mode,
+		counters
 		):
 
 	total_wallclock_duration = max(node.wallclock_durations)
@@ -320,6 +344,15 @@ def plot_pfg_node(
 
 	edgecolour = (0.0,0.0,0.0,1.0)
 
+	num = 0
+	denom = 0
+	for parallelism, interval in node.node_partitions[0].parallelism_intervals.items():
+		num += parallelism*interval
+		denom += interval
+
+	# denom cannot be 0
+	weighted_arithmetic_mean_parallelism = float(num) / denom
+
 	# Key to use to determine the colour of the rectangle
 	colour_identifier = "None"
 	if colour_mode == ColourMode.BY_PARENT:
@@ -328,27 +361,10 @@ def plot_pfg_node(
 	elif colour_mode == ColourMode.BY_CPU:
 		colour_identifier = ",".join([str(cpu) for cpu in node.cpus])
 	elif colour_mode == ColourMode.BY_PARALLELISM:
-		# identifier is the number of cycles lost due to inefficiency, so the colours are ordered
-		total_cpu_cycles_lost = 0
-		for parallelism, interval in node.node_partitions[0].parallelism_intervals.items():
-			optimal_cpu_cycles = ((parallelism)/len(cpus)) * interval
-			total_cpu_cycles_lost += (interval - optimal_cpu_cycles)
-		colour_identifier = total_cpu_cycles_lost
-
-		# Instead, it should be proportion of interval in parallelism, and must be independent of the interval!
-		# Or how about, average parallelism, weighted by time spent in that parallelism!
-		
-		num = 0
-		denom = 0
-		for parallelism, interval in node.node_partitions[0].parallelism_intervals.items():
-			num += parallelism*interval
-			denom += interval
-
-		# denom cannot be 0
-		weighted_arithmetic_mean_parallelism = float(num) / denom
-
 		colour_identifier = weighted_arithmetic_mean_parallelism
-
+	elif colour_mode == ColourMode.BY_EVENT_VALUE:
+		# Default event is the first one
+		colour_identifier = node.node_partitions[0].per_event_values[0]
 	else:
 		logging.error("Colour mode not supported.")
 		raise NotImplementedError()
@@ -360,10 +376,15 @@ def plot_pfg_node(
 	else:
 		parent_identifier = str(hex(id(node.original_parent_node)))
 
-	info_text = "Total duration: " + sizeof_fmt(total_wallclock_duration) + "\n"
-	info_text += "Avg parallelism: " + str(colour_identifier) + "\n"
+	info_text = "Total wallclock duration: " + sizeof_fmt(total_wallclock_duration) + "\n"
+	info_text += "Total CPU time: " + sizeof_fmt(sum([part.cpu_time for part in node.node_partitions])) + "\n"
+	info_text += "Avg parallelism: " + str(weighted_arithmetic_mean_parallelism) + "\n"
 	info_text += "".join([part.name + ": " + sizeof_fmt(part.wallclock_duration) + "\n" for part in node.node_partitions]) + "\n"
-	info_text += "Parent=[" + str(parent_name) + ":" + str(parent_identifier) + "]\n"
+	info_text += "Parent=[" + str(parent_name) + ":" + str(parent_identifier) + "]\n\n"
+	for event_idx, event_name in counters.items():
+		info_text += event_name + ": " + sizeof_fmt(node.node_partitions[0].per_event_values[event_idx], suffix="") + "\n"
+		if event_idx + 1 == len(counters):
+			info_text += "\n"
 	wallclock_durations_by_cpu = node.get_per_cpu_wallclock_durations()
 	for cpu, duration in wallclock_durations_by_cpu.items():
 		info_text += str(cpu) + ": " + str(sizeof_fmt(duration)) + "\n"
@@ -387,6 +408,7 @@ def plot_pfg_node(
 		ax.rectangles[node_identifier] = [x0, total_node_width, y0, total_node_height]
 
 	for part_idx, part in enumerate(node.node_partitions):
+
 		if part_idx == 1:
 			logging.error("hello")
 			exit(1)
@@ -396,6 +418,8 @@ def plot_pfg_node(
 	
 		#facecolour = (1.0,1.0,1.0,1.0)
 
+		colour_options = []
+
 		if colour_mode == ColourMode.BY_PARALLELISM:
 			minimum_colour = colour_values[0]
 			maximum_colour = colour_values[1]
@@ -404,10 +428,65 @@ def plot_pfg_node(
 			# Choose between darker red = poor parallelism (first line) or darker_red = high parallelism (second line)
 			#colour_value = maximum_colour - ((float(colour_identifier) / len(cpus)) * (maximum_colour-minimum_colour))
 			colour_value = minimum_colour + ((float(colour_identifier) / len(cpus)) * (maximum_colour-minimum_colour))
+			facecolour = colours(colour_value)
+
+			colour_options.append(facecolour)
+
+		elif colour_mode == ColourMode.BY_EVENT_VALUE:
+			
+			for event_idx in list(counters.keys()):
+
+				minimum_colour = colour_values[0]
+				maximum_colour = colour_values[1]
+
+				colour_identifier = part.per_event_values[event_idx]
+
+				min_colour_identifier = min(list(node_colour_mapping[event_idx].keys()))
+				max_colour_identifier = max(list(node_colour_mapping[event_idx].keys()))
+				if max_colour_identifier == min_colour_identifier:
+					max_colour_identifier += 1
+
+				colour_value = minimum_colour + ((float(colour_identifier) / (max_colour_identifier-min_colour_identifier)) * (maximum_colour-minimum_colour))
+
+				logging.trace("Minimum value %s, maximum value %s, and this node (%s) value %s, gives colour_value %s",
+					sizeof_fmt(min_colour_identifier,suffix=""),
+					sizeof_fmt(max_colour_identifier,suffix=""),
+					part.name,
+					sizeof_fmt(colour_identifier,suffix=""),
+					colour_value)
+
+				facecolour = colours(colour_value)
+
+				colour_options.append(facecolour)
+
+			# Integrate the PARALLELISM metric as an 'event'
+			# TODO integrate this properly, to be a single approach for all metrics
+			minimum_colour = colour_values[0]
+			maximum_colour = colour_values[1]
+
+			colour_identifier = weighted_arithmetic_mean_parallelism
+
+			min_colour_identifier = min(list(node_colour_mapping[-1].keys()))
+			max_colour_identifier = max(list(node_colour_mapping[-1].keys()))
+			if max_colour_identifier == min_colour_identifier:
+				max_colour_identifier += 1
+
+			colour_value = minimum_colour + ((float(colour_identifier) / (max_colour_identifier-min_colour_identifier)) * (maximum_colour-minimum_colour))
+
+			logging.trace("Minimum value %s, maximum value %s, and this node (%s) value %s, gives colour_value %s",
+				sizeof_fmt(min_colour_identifier,suffix=""),
+				sizeof_fmt(max_colour_identifier,suffix=""),
+				part.name,
+				sizeof_fmt(colour_identifier,suffix=""),
+				colour_value)
 
 			facecolour = colours(colour_value)
+			colour_options.append(facecolour)
+
 		else:
+
 			facecolour = colours(colour_values[node_colour_mapping[colour_identifier]])
+			colour_options.append(facecolour)
 
 		logging.trace("Plotting %s on cpus %s with width %f at x=%f,y=%f", part.name, node.cpus, part_width, x0, y0)
 
@@ -417,11 +496,15 @@ def plot_pfg_node(
 			part_height,
 			linewidth=1,
 			edgecolor=edgecolour,
-			facecolor=facecolour,
+			facecolor=colour_options[0],
 			gid=None,
-			zorder=10)
+			zorder=10,
+			picker=True)
+
+		rect.colour_options = colour_options
 
 		ax.add_patch(rect)
+		ax.plotted_bars.append(rect)
 		
 		text = PFGBarText(ax, x0, x0+part_width, y0, y0+part_height, part.name)
 
@@ -435,7 +518,8 @@ def plot_pfg_tree(tree,
 		cpus,
 		height_option,
 		output_file=None,
-		x_bounds=None
+		x_bounds=None,
+		counters={}
 		):
 
 	if len(tree.root_nodes) == 0:
@@ -454,15 +538,44 @@ def plot_pfg_tree(tree,
 
 	if tree.colour_mode == ColourMode.BY_PARALLELISM:
 		colour_values = [minimum_colour, maximum_colour]
+	elif tree.colour_mode == ColourMode.BY_EVENT_VALUE:
+		colour_values = [minimum_colour, maximum_colour]
 	else:
 		random.shuffle(colour_values)
 
 	fig = plt.figure()
 	fig.set_size_inches(14, 8)
-	ax = fig.add_subplot(111)
+	ax = fig.add_subplot(111, picker=True)
 
 	ax.rectangles = {}
+	ax.plotted_bars = []
 	ax.highlighted_rectangle = None
+	
+	ax.counters_line_map = {}
+
+	default_counter_idx = 0
+	if len(counters) > 0:
+
+		counter_patches = []
+		# make a list of counters using the legend, that can be clicked
+		for counter_idx, counter_name in counters.items():
+			color = "Red" if counter_idx == default_counter_idx else "none"
+			counter_patch = patches.Patch(color=color, label=counter_name, picker=True)
+			counter_patches.append(counter_patch)
+
+	color = "Red" if len(counters) == 0 else "none"
+	counter_patch = patches.Patch(color=color, label="PARALLELISM", picker=True)
+	counter_patches.append(counter_patch)
+
+	leg = plt.legend(handles=counter_patches)
+
+	for leg_idx, leg_label in enumerate(leg.get_texts()):
+		leg_label.set_picker(5)
+		ax.counters_line_map[leg_label] = leg_idx
+
+	ax.legend = leg
+	ax.selected_counter = default_counter_idx
+	fig.canvas.mpl_connect('pick_event', onpick)
 
 	top_level_width = 100.0
 
@@ -532,7 +645,8 @@ def plot_pfg_tree(tree,
 					colour_values,
 					cpus,
 					node_colour_mapping,
-					tree.colour_mode
+					tree.colour_mode,
+					counters
 					)
 
 				# write the positions of this node for my children/siblings
@@ -584,9 +698,5 @@ def plot_pfg_tree(tree,
 	else:
 		logging.info("Saving plot to %s.", output_file)
 		fig.savefig(output_file, format="png", dpi=400, bbox_inches="tight")
-
-
-
-
 
 

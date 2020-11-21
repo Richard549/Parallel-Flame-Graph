@@ -16,6 +16,27 @@ class ColourMode(Enum):
 	BY_PARENT = auto()
 	BY_CPU = auto()
 	BY_PARALLELISM = auto()
+	BY_EVENT_VALUE = auto() 
+
+def get_aggregate_event_counts_for_entities(
+		entities
+		):
+
+	per_event_values_across_cpus = defaultdict(list)
+
+	for entity in entities:
+		for cpu, value_per_event in entity.per_cpu_event_values.items():
+			for event_idx, value in value_per_event.items():
+				per_event_values_across_cpus[event_idx].append(value)
+
+	summed_per_event_values = {}
+	average_per_event_values = {}
+
+	for event_idx, values in per_event_values_across_cpus.items():
+		summed_per_event_values[event_idx] = sum(values)
+		average_per_event_values[event_idx] = np.mean(values)
+
+	return summed_per_event_values, average_per_event_values
 
 def get_durations_for_entities(
 		entities
@@ -66,12 +87,15 @@ class PFGTreeNodeElement:
 			name,
 			wallclock_duration,
 			parallelism_intervals,
+			per_event_values,
 			cpu_time=None
 			):
 
 		self.name = name
 		self.wallclock_duration = wallclock_duration # this is truly wallclock duration, must be careful to choose the correct one when merging
 		self.parallelism_intervals = parallelism_intervals # total CPU time spent in each parallelism state, this should sum to CPU time
+		self.per_event_values = per_event_values
+		logging.info("Created Element for %s this: %s", name, per_event_values)
 
 		if cpu_time is None:
 			self.cpu_time = wallclock_duration
@@ -88,13 +112,17 @@ class PFGTreeNodeExecutionInterval:
 			name,
 			cpu,
 			duration,
-			parallelism_intervals
+			parallelism_intervals,
+			per_event_values
 			):
 
 		self.cpu = cpu
 		self.name = name
 		self.duration = duration
 		self.parallelism_intervals = parallelism_intervals # these are how long this CPU spent in each parallelism state, should sum to duration
+
+		logging.info("Created Interval for %s this: %s", name, per_event_values)
+		self.per_event_values = per_event_values
 
 class PFGTreeNode:
 
@@ -105,6 +133,7 @@ class PFGTreeNode:
 			wallclock_duration,
 			parallelism_intervals,
 			depth,
+			per_event_values,
 			alignment_node=None
 			):
 
@@ -123,10 +152,10 @@ class PFGTreeNode:
 
 		self.child_nodes = []
 
-		first_element = PFGTreeNodeElement(name, wallclock_duration, parallelism_intervals)
+		first_element = PFGTreeNodeElement(name, wallclock_duration, parallelism_intervals, per_event_values)
 		self.node_partitions = [first_element]
 		
-		first_interval = PFGTreeNodeExecutionInterval(name, cpu, wallclock_duration, parallelism_intervals)
+		first_interval = PFGTreeNodeExecutionInterval(name, cpu, wallclock_duration, parallelism_intervals, per_event_values)
 		self.execution_intervals = [first_interval]
 
 		# for plotting
@@ -144,6 +173,7 @@ class PFGTreeNode:
 		wallclock_durations_by_group = defaultdict(int)
 		cpu_time_by_group = defaultdict(int)
 		parallelism_intervals_by_group = defaultdict(lambda: defaultdict(int))
+		per_event_values_by_group = defaultdict(lambda: defaultdict(int))
 		for execution_interval in self.execution_intervals:
 
 			if cpu_time == True or execution_interval.cpu == self.cpus[0]:
@@ -154,6 +184,9 @@ class PFGTreeNode:
 
 			for parallelism, interval in execution_interval.parallelism_intervals.items():
 				parallelism_intervals_by_group[execution_interval.name][parallelism] += interval 
+			
+			for event_idx, value in execution_interval.per_event_values.items():
+				per_event_values_by_group[execution_interval.name][event_idx] += value
 
 			cpu_time_by_group[execution_interval.name] += execution_interval.duration
 
@@ -166,8 +199,11 @@ class PFGTreeNode:
 		for group, duration in wallclock_durations_by_group.items():
 			cpu_time = cpu_time_by_group[group]
 			parallelism_intervals_for_group = parallelism_intervals_by_group[group]
+			per_event_values_for_group = per_event_values_by_group[group]
 
-			part = PFGTreeNodeElement(group, duration, parallelism_intervals_for_group, cpu_time)
+			logging.info("Per event values for group: %s", per_event_values_for_group)
+
+			part = PFGTreeNodeElement(group, duration, parallelism_intervals_for_group, per_event_values_for_group, cpu_time)
 
 			total_wallclock_duration += duration
 			self.node_partitions.append(part)
@@ -176,7 +212,6 @@ class PFGTreeNode:
 			#	self.parallelism_intervals[parallelism] += cpu_time
 
 		self.wallclock_durations[0] = total_wallclock_duration
-
 		
 	# Return the durations over all intervals. For each CPU, we assume the intervals occur sequentially is wallclock.
 	# TODO fix what happens in a recursive function, where one CPU calls a function many times - the wallclocks of these functions will be summed!
@@ -238,8 +273,9 @@ class PFGTree:
 
 						entity_as_list = [entity]
 						cpus, wallclock_durations, parallelism_intervals, active_wallclock_durations = get_durations_for_entities(entity_as_list)
+						summed_per_event_values, average_per_event_values = get_aggregate_event_counts_for_entities(entity_as_list)
 
-						logging.info("Got %s from entity %s of group %s", wallclock_durations, entity.identifier, group)
+						logging.info("Got %s from entity %s of group %s with aggregate_per_event_values %s", wallclock_durations, entity.identifier, group, summed_per_event_values)
 
 						node = PFGTreeNode(
 							parent_node=parent_node,
@@ -247,7 +283,8 @@ class PFGTree:
 							cpu=cpu,
 							wallclock_duration=wallclock_durations[0],
 							parallelism_intervals=parallelism_intervals,
-							depth=depth
+							depth=depth,
+							per_event_values=summed_per_event_values
 							)
 
 						node.active_wallclock_durations = active_wallclock_durations
@@ -258,6 +295,7 @@ class PFGTree:
 
 				else:
 					cpus, wallclock_durations, parallelism_intervals, active_wallclock_durations = get_durations_for_entities(entities_for_group)
+					summed_per_event_values, average_per_event_values = get_aggregate_event_counts_for_entities(entity_as_list)
 
 					node = PFGTreeNode(
 						parent_node=parent_node,
@@ -265,7 +303,8 @@ class PFGTree:
 						cpu=cpu,
 						wallclock_duration=wallclock_durations[0],
 						parallelism_intervals=parallelism_intervals,
-						depth=depth
+						depth=depth,
+						per_event_values=summed_per_event_values
 						)
 
 					node.active_wallclock_durations = active_wallclock_durations
@@ -360,6 +399,7 @@ class PFGTree:
 	def transform_tree_aggregate_siblings_across_cpus(self):
 
 		self.colour_mode = ColourMode.BY_PARALLELISM
+		self.colour_mode = ColourMode.BY_EVENT_VALUE
 
 		if self.stack_frames_aggregated == False:
 			self.transform_tree_aggregate_stack_frames()
@@ -708,29 +748,34 @@ class PFGTree:
 
 	def assign_colour_indexes_to_nodes(self, nodes, num_cpus, mapped_nodes=None):
 
+		# TODO so very hacky
 		if mapped_nodes is None:
-			mapped_nodes = {}
+			if self.colour_mode == ColourMode.BY_EVENT_VALUE:
+				mapped_nodes = []
+			else:
+				mapped_nodes = {}
 
 		for node in nodes:
 
-			if self.colour_mode == ColourMode.BY_PARENT:
-				if node.original_parent_node is None:
-					colour_identifier = "None"
-				else:
-					colour_identifier = str(hex(id(node.original_parent_node)))
-			elif self.colour_mode == ColourMode.BY_CPU:
-				colour_identifier = ",".join([str(cpu) for cpu in node.cpus])
-			elif self.colour_mode == ColourMode.BY_PARALLELISM:
-				# identifier is the number of cycles lost due to inefficiency, so the colours are ordered
-				total_cpu_cycles_lost = 0
-				for parallelism, interval in node.node_partitions[0].parallelism_intervals.items():
-					optimal_cpu_cycles = ((parallelism)/num_cpus) * interval
-					total_cpu_cycles_lost += (interval - optimal_cpu_cycles)
-				colour_identifier = total_cpu_cycles_lost
+			if self.colour_mode == ColourMode.BY_EVENT_VALUE:
 
-				# Instead, it should be proportion of interval in parallelism, and must be independent of the interval!
-				# Or how about, average parallelism, weighted by time spent in that parallelism!
-				
+				for event_idx, value in node.node_partitions[0].per_event_values.items():
+
+					if event_idx >= len(mapped_nodes):
+						mapped_nodes.append({})
+
+					colour_identifier = value
+			
+					if colour_identifier not in mapped_nodes[event_idx]:
+						# assign a new index
+						next_index = len(mapped_nodes[event_idx])
+						mapped_nodes[event_idx][colour_identifier] = next_index
+
+				# create a parallelism one
+				parallelism_event_idx = len(node.node_partitions[0].per_event_values.items())
+				if parallelism_event_idx == len(mapped_nodes):
+					mapped_nodes.append({})
+					
 				num = 0
 				denom = 0
 				for parallelism, interval in node.node_partitions[0].parallelism_intervals.items():
@@ -739,19 +784,48 @@ class PFGTree:
 
 				# denom cannot be 0
 				weighted_arithmetic_mean_parallelism = float(num) / denom
-
 				colour_identifier = weighted_arithmetic_mean_parallelism
+			
+				if colour_identifier not in mapped_nodes[parallelism_event_idx]:
+					# assign a new index
+					next_index = len(mapped_nodes[parallelism_event_idx])
+					mapped_nodes[parallelism_event_idx][colour_identifier] = next_index
+			
+				self.assign_colour_indexes_to_nodes(node.child_nodes, num_cpus, mapped_nodes)
 
 			else:
-				logging.error("Colour mode not supported.")
-				raise NotImplementedError()
 
-			if colour_identifier not in mapped_nodes:
-				# assign a new index
-				next_index = len(mapped_nodes)
-				mapped_nodes[colour_identifier] = next_index
-			
-			self.assign_colour_indexes_to_nodes(node.child_nodes, num_cpus, mapped_nodes)
+				if self.colour_mode == ColourMode.BY_PARENT:
+					if node.original_parent_node is None:
+						colour_identifier = "None"
+					else:
+						colour_identifier = str(hex(id(node.original_parent_node)))
+				elif self.colour_mode == ColourMode.BY_CPU:
+					colour_identifier = ",".join([str(cpu) for cpu in node.cpus])
+				elif self.colour_mode == ColourMode.BY_PARALLELISM:
+					num = 0
+					denom = 0
+					for parallelism, interval in node.node_partitions[0].parallelism_intervals.items():
+						num += parallelism*interval
+						denom += interval
+
+					# denom cannot be 0
+					weighted_arithmetic_mean_parallelism = float(num) / denom
+					colour_identifier = weighted_arithmetic_mean_parallelism
+
+				elif self.colour_mode == ColourMode.BY_EVENT_VALUE:
+					pass
+
+				else:
+					logging.error("Colour mode not supported.")
+					raise NotImplementedError()
+
+				if colour_identifier not in mapped_nodes:
+					# assign a new index
+					next_index = len(mapped_nodes)
+					mapped_nodes[colour_identifier] = next_index
+				
+				self.assign_colour_indexes_to_nodes(node.child_nodes, num_cpus, mapped_nodes)
 
 		return mapped_nodes
 
