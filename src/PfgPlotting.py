@@ -444,9 +444,9 @@ def plot_pfg_node(
 				min_colour_identifier = min(list(node_colour_mapping[event_idx].keys()))
 				max_colour_identifier = max(list(node_colour_mapping[event_idx].keys()))
 				if max_colour_identifier == min_colour_identifier:
-					max_colour_identifier += 1
-
-				colour_value = minimum_colour + ((float(colour_identifier) / (max_colour_identifier-min_colour_identifier)) * (maximum_colour-minimum_colour))
+					colour_value = minimum_colour
+				else:
+					colour_value = minimum_colour + ((float(colour_identifier) / (max_colour_identifier-min_colour_identifier)) * (maximum_colour-minimum_colour))
 
 				logging.trace("Minimum value %s, maximum value %s, and this node (%s) value %s, gives colour_value %s",
 					sizeof_fmt(min_colour_identifier,suffix=""),
@@ -466,12 +466,15 @@ def plot_pfg_node(
 
 			colour_identifier = weighted_arithmetic_mean_parallelism
 
-			min_colour_identifier = min(list(node_colour_mapping[-1].keys()))
-			max_colour_identifier = max(list(node_colour_mapping[-1].keys()))
-			if max_colour_identifier == min_colour_identifier:
-				max_colour_identifier += 1
+			#min_colour_identifier = min(list(node_colour_mapping[-1].keys()))
+			min_colour_identifier = 1.0
+			max_colour_identifier = float(len(cpus))
 
-			colour_value = minimum_colour + ((float(colour_identifier) / (max_colour_identifier-min_colour_identifier)) * (maximum_colour-minimum_colour))
+			colour_value = None
+			if max_colour_identifier == min_colour_identifier:
+				colour_value = maximum_colour
+			else:
+				colour_value = minimum_colour + ((float(colour_identifier) / (max_colour_identifier-min_colour_identifier)) * (maximum_colour-minimum_colour))
 
 			logging.trace("Minimum value %s, maximum value %s, and this node (%s) value %s, gives colour_value %s",
 				sizeof_fmt(min_colour_identifier,suffix=""),
@@ -567,7 +570,7 @@ def plot_pfg_tree(tree,
 	counter_patch = patches.Patch(color=color, label="PARALLELISM", picker=True)
 	counter_patches.append(counter_patch)
 
-	leg = plt.legend(handles=counter_patches)
+	leg = plt.legend(handles=counter_patches, ncol=2)
 
 	for leg_idx, leg_label in enumerate(leg.get_texts()):
 		leg_label.set_picker(5)
@@ -680,7 +683,7 @@ def plot_pfg_tree(tree,
 
 		ax.set_xlim([0, coefficient*maximum_x])
 
-	ax.set_ylim([0,maximum_y*1.25])
+	ax.set_ylim([0,maximum_y*1.5])
 
 	# Create the hover-over
 	hover_text = PFGHoverText(ax)
