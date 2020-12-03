@@ -158,6 +158,10 @@ class PFGTreeNode:
 		first_interval = PFGTreeNodeExecutionInterval(name, cpu, wallclock_duration, parallelism_intervals, per_event_values)
 		self.execution_intervals = [first_interval]
 
+		# A negative differential interval means we need an inner bar
+		# A positive differential interval means we need a bar extension
+		self.differential_interval = None
+
 		# for plotting
 		self.start_x = None
 		self.width = None
@@ -827,5 +831,38 @@ class PFGTree:
 				
 				self.assign_colour_indexes_to_nodes(node.child_nodes, num_cpus, mapped_nodes)
 
+		self.node_colour_mapping = mapped_nodes
+
 		return mapped_nodes
+
+def calculate_nodes_differential(reference_nodes, target_nodes):
+
+	# TODO should have some mapping algorithm to determine node pairs, then just iterate through the node pairs
+	# For now, assuming isomorphism, so we can just step through both as a depth first search and we should land on the 'same' node at each step
+
+	# For each ref_node in self
+		# Find the same tar_node in target_tree
+		# Adjust ref_node
+	
+	if len(reference_nodes) != len(target_nodes):
+		logging.error("Found %s reference nodes but %s target nodes. Differential comparison is currently assuming isomorphism. Aborting.")
+		raise ValueError()
+
+	for node_comparison_idx in range(len(reference_nodes)):
+
+		ref_node = reference_nodes[node_comparison_idx]
+		tar_node = target_nodes[node_comparison_idx]
+
+		ref_node_wallclock = max(ref_node.wallclock_durations)
+		tar_node_wallclock = max(tar_node.wallclock_durations)
+
+		ref_node.differential_interval = tar_node_wallclock - ref_node_wallclock
+
+		if ref_node.differential_interval < 0:
+			logging.debug("Target node %s at depth %s was faster than the reference by %s", ref_node.node_partitions[0].name, ref_node.original_depth, abs(ref_node.differential_interval))
+		else:
+			logging.debug("Target node %s at depth %s was slower than the reference by %s", ref_node.node_partitions[0].name, ref_node.original_depth, ref_node.differential_interval)
+
+		if len(ref_node.child_nodes) > 0:
+			calculate_nodes_differential(ref_node.child_nodes, tar_node.child_nodes)
 

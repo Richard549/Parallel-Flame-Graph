@@ -13,6 +13,10 @@ from enum import Enum, auto
 from PfgUtil import sizeof_fmt
 from PfgTree import ColourMode
 
+import datetime
+
+PUSH_DIFFERENTIAL_EXTENSIONS_TO_END = True
+
 class HeightDisplayOption(Enum):
 	CONSTANT = auto()
 	CPU_TIME = auto()
@@ -78,37 +82,25 @@ class PFGHoverText:
 """
 class PFGBarText:
 
-	def __init__(self, ax, x1, x2, y1, y2, text):
+	def __init__(self, ax, x1, x2, y1, y2, text, alpha=1.0):
 
+		# The resize event will be called when the window opens,
+		# so we can wait for the call function to run for the actual plotting of the text
+		ax.bar_texts.append(self)
 		self.ax = ax
-
-		# Calculate the per character width (in data-coords)
-		test_box = ax.text(5, 5, 'a', fontsize='small')
-		bbox = test_box.get_window_extent(renderer=ax.figure.canvas.get_renderer())
-		bbox = Bbox(ax.transData.inverted().transform(bbox))
-		self.per_char_data_width = bbox.width
-		self.per_char_data_height = bbox.height
-		test_box.remove()
-
 		self.bar_x1 = x1
 		self.bar_x2 = x2
 		self.bar_y1 = y1
 		self.bar_y2 = y2
 		self.text = text
+		self.alpha=alpha
 
-		xlims = ax.get_xlim()
-		ylims = ax.get_ylim()
-
-		# determine the initial position of the text
-		x, y, processed_text = self.compute_text_position_info(ax, xlims, ylims, text)
-		
-		text_box = ax.text(x, y, processed_text, zorder=20, fontsize='small')
-
-		self.cid = ax.callbacks.connect('resize_event', self)
-		self.cid2 = ax.callbacks.connect('xlim_changed', self)
-		self.cid3 = ax.callbacks.connect('ylim_changed', self)
-
+		text_box = ax.text(-20, -20, "", zorder=20, fontsize='small', alpha=alpha)
 		self.text_box = text_box
+
+		ax.figure.canvas.mpl_connect('resize_event', self) # when the window is resized
+		ax.callbacks.connect('xlim_changed',self)
+		ax.callbacks.connect('ylim_changed',self)
 
 	def get_per_char_data_width(self):
 		return self.per_char_data_width
@@ -214,10 +206,11 @@ class PFGBarText:
 		return text_position_x, text_position_y, processed_text
 
 	def __call__(self, event):
+
 		# function is called on each scale change or window resized
 
 		# recalculate the width of each character in data coordinates
-		test_box = self.ax.text(5, 5, 'a', fontsize='small')
+		test_box = self.ax.text(5, 5, 'a', fontsize='small',alpha=self.alpha)
 		bbox = test_box.get_window_extent(renderer=self.ax.figure.canvas.get_renderer())
 		bbox = Bbox(self.ax.transData.inverted().transform(bbox))
 		self.per_char_data_width = bbox.width
@@ -234,8 +227,6 @@ class PFGBarText:
 
 		self.text_box.set_position((x, y))
 		self.text_box.set_text(processed_text)
-
-		self.text_box.figure.canvas.draw()
 
 def onpick(event):
 	art = event.artist
@@ -376,44 +367,24 @@ def plot_pfg_node(
 	else:
 		parent_identifier = str(hex(id(node.original_parent_node)))
 
-	info_text = "Total wallclock duration: " + sizeof_fmt(total_wallclock_duration) + "\n"
-	info_text += "Total CPU time: " + sizeof_fmt(sum([part.cpu_time for part in node.node_partitions])) + "\n"
-	info_text += "Avg parallelism: " + str(weighted_arithmetic_mean_parallelism) + "\n"
-	info_text += "".join([part.name + ": " + sizeof_fmt(part.wallclock_duration) + "\n" for part in node.node_partitions]) + "\n"
-	info_text += "Parent=[" + str(parent_name) + ":" + str(parent_identifier) + "]\n\n"
-	for event_idx, event_name in counters.items():
-		info_text += event_name + ": " + sizeof_fmt(node.node_partitions[0].per_event_values[event_idx], suffix="") + "\n"
-		if event_idx + 1 == len(counters):
-			info_text += "\n"
-	wallclock_durations_by_cpu = node.get_per_cpu_wallclock_durations()
-	for cpu, duration in wallclock_durations_by_cpu.items():
-		info_text += str(cpu) + ": " + str(sizeof_fmt(duration)) + "\n"
-
-	# Invisible rectangle just for the hover-over text
-	rect = patches.Rectangle(
-		(x0,y0),
-		total_node_width,
-		total_node_height,
-		linewidth=0,
-		edgecolor=(0.0,0.0,0.0,0.0),
-		facecolor=(0.0,0.0,0.0,0.0),
-		gid=info_text,
-		zorder=0)
-	
-	ax.add_patch(rect)
-
-	if ax.rectangles is None:
-		ax.rectangles = {node_identifier: [x0, total_node_width, y0, total_node_height]}
-	else:
-		ax.rectangles[node_identifier] = [x0, total_node_width, y0, total_node_height]
+	total_realised_wallclock_duration = 0.0
+	original_x0 = x0
+	extended_rectangles = []
 
 	for part_idx, part in enumerate(node.node_partitions):
 
 		if part_idx == 1:
-			logging.error("hello")
+			# TODO review partitioning design
+			logging.error("Multiple partitions is not yet implemented properly with the latest code")
 			exit(1)
 		
-		part_width = width_to_interval_ratio * part.wallclock_duration
+		realised_part_duration = part.wallclock_duration
+		if node.differential_interval is not None and node.differential_interval < 0:
+			realised_part_duration += node.differential_interval
+
+		total_realised_wallclock_duration += realised_part_duration
+		
+		part_width = width_to_interval_ratio * realised_part_duration
 		part_height = heights[part_idx]
 	
 		#facecolour = (1.0,1.0,1.0,1.0)
@@ -448,12 +419,14 @@ def plot_pfg_node(
 				else:
 					colour_value = minimum_colour + ((float(colour_identifier) / (max_colour_identifier-min_colour_identifier)) * (maximum_colour-minimum_colour))
 
+				'''
 				logging.trace("Minimum value %s, maximum value %s, and this node (%s) value %s, gives colour_value %s",
 					sizeof_fmt(min_colour_identifier,suffix=""),
 					sizeof_fmt(max_colour_identifier,suffix=""),
 					part.name,
 					sizeof_fmt(colour_identifier,suffix=""),
 					colour_value)
+				'''
 
 				facecolour = colours(colour_value)
 
@@ -476,12 +449,14 @@ def plot_pfg_node(
 			else:
 				colour_value = minimum_colour + ((float(colour_identifier) / (max_colour_identifier-min_colour_identifier)) * (maximum_colour-minimum_colour))
 
+			'''
 			logging.trace("Minimum value %s, maximum value %s, and this node (%s) value %s, gives colour_value %s",
 				sizeof_fmt(min_colour_identifier,suffix=""),
 				sizeof_fmt(max_colour_identifier,suffix=""),
 				part.name,
 				sizeof_fmt(colour_identifier,suffix=""),
 				colour_value)
+			'''
 
 			facecolour = colours(colour_value)
 			colour_options.append(facecolour)
@@ -493,27 +468,146 @@ def plot_pfg_node(
 
 		logging.trace("Plotting %s on cpus %s with width %f at x=%f,y=%f", part.name, node.cpus, part_width, x0, y0)
 
-		rect = patches.Rectangle(
-			(x0,y0),
-			part_width,
-			part_height,
-			linewidth=1,
-			edgecolor=edgecolour,
-			facecolor=colour_options[0],
-			gid=None,
-			zorder=10,
-			picker=True)
+		# If there is a differential, then I need to split the rectangle into two
+		if node.differential_interval is not None:
+			if node.differential_interval < 0:
+				# I need to divide the rectangle into an inner fast-interval and a low-alpha reference remainder
 
-		rect.colour_options = colour_options
+				#inner_part_width = width_to_interval_ratio * (part.wallclock_duration + node.differential_interval)
+				inner_rect = patches.Rectangle(
+					(x0,y0),
+					part_width,
+					part_height,
+					linewidth=1,
+					edgecolor=edgecolour,
+					facecolor=colour_options[0],
+					gid=None,
+					zorder=10,
+					picker=True)
+				
+				inner_rect.colour_options = colour_options
+				ax.add_patch(inner_rect)
+				ax.plotted_bars.append(inner_rect)
+				text = PFGBarText(ax, x0, x0+part_width, y0, y0+part_height, part.name)
+			
+				# TODO The extended part should be moved to the end of the siblings!
+				extended_part_width = width_to_interval_ratio * abs(node.differential_interval)
+				extended_edgecolour = list(edgecolour)
+				extended_facecolour = list(colour_options[0])
+				extended_edgecolour[3] = 0.05
+				extended_facecolour[3] = 0.05
+				extended_edgecolour = tuple(extended_edgecolour)
+				extended_facecolour = tuple(extended_facecolour)
 
-		ax.add_patch(rect)
-		ax.plotted_bars.append(rect)
+				if PUSH_DIFFERENTIAL_EXTENSIONS_TO_END == False:
+					extended_rect = patches.Rectangle(
+						(x0+part_width,y0),
+						extended_part_width,
+						part_height,
+						linewidth=1,
+						edgecolor=extended_edgecolour,
+						facecolor=extended_facecolour,
+						gid=None,
+						zorder=10,
+						picker=True)
+
+					extended_rect.colour_options = colour_options
+					ax.add_patch(extended_rect)
+					ax.plotted_bars.append(extended_rect)
+					text = PFGBarText(ax, x0+part_width, x0+part_width+extended_part_width, y0, y0+part_height, part.name, 0.05)
+
+					part_width += extended_part_width
+					total_realised_wallclock_duration += abs(node.differential_interval)
+
+				else:
+					extended_rect_info = [
+						extended_part_width,
+						part_height,
+						extended_edgecolour,
+						extended_facecolour,
+						part.name,
+						colour_options
+					]
+					extended_rectangles.append(extended_rect_info)
+
+			else:
+				# it is longer in the target so I need to extend!
+				# TODO TODO TODO
+				rect = patches.Rectangle(
+					(x0,y0),
+					part_width,
+					part_height,
+					linewidth=1,
+					edgecolor=edgecolour,
+					facecolor=colour_options[0],
+					#facecolor=colours(colour_values[0]) if node.differential_interval < 0 else colours(colour_values[1]),
+					gid=None,
+					zorder=10,
+					picker=True)
+
+				rect.colour_options = colour_options
+
+				ax.add_patch(rect)
+				ax.plotted_bars.append(rect)
+
+				text = PFGBarText(ax, x0, x0+part_width, y0, y0+part_height, part.name)
+
+		else:
+			rect = patches.Rectangle(
+				(x0,y0),
+				part_width,
+				part_height,
+				linewidth=1,
+				edgecolor=edgecolour,
+				facecolor=colour_options[0],
+				#facecolor=colours(colour_values[0]) if node.differential_interval < 0 else colours(colour_values[1]),
+				gid=None,
+				zorder=10,
+				picker=True)
+
+			rect.colour_options = colour_options
+
+			ax.add_patch(rect)
+			ax.plotted_bars.append(rect)
 		
-		text = PFGBarText(ax, x0, x0+part_width, y0, y0+part_height, part.name)
+			text = PFGBarText(ax, x0, x0+part_width, y0, y0+part_height, part.name)
 
 		x0 += part_width
+	
+	total_node_width = width_to_interval_ratio * total_realised_wallclock_duration
+	
+	info_text = "Total wallclock duration: " + sizeof_fmt(total_wallclock_duration) + "\n"
+	info_text += "Total CPU time: " + sizeof_fmt(sum([part.cpu_time for part in node.node_partitions])) + "\n"
+	info_text += "Avg parallelism: " + str(weighted_arithmetic_mean_parallelism) + "\n"
+	info_text += "".join([part.name + ": " + sizeof_fmt(part.wallclock_duration) + "\n" for part in node.node_partitions]) + "\n"
+	info_text += "Parent=[" + str(parent_name) + ":" + str(parent_identifier) + "]\n\n"
+	for event_idx, event_name in counters.items():
+		info_text += event_name + ": " + sizeof_fmt(node.node_partitions[0].per_event_values[event_idx], suffix="") + "\n"
+		if event_idx + 1 == len(counters):
+			info_text += "\n"
+	wallclock_durations_by_cpu = node.get_per_cpu_wallclock_durations()
+	for cpu, duration in wallclock_durations_by_cpu.items():
+		info_text += str(cpu) + ": " + str(sizeof_fmt(duration)) + "\n"
 
-	return total_node_width, total_node_height
+	# Invisible rectangle just for the hover-over text
+	rect = patches.Rectangle(
+		(original_x0,y0),
+		total_node_width,
+		total_node_height,
+		linewidth=0,
+		edgecolor=(0.0,0.0,0.0,0.0),
+		facecolor=(0.0,0.0,0.0,0.0),
+		gid=info_text,
+		zorder=0)
+	
+	ax.add_patch(rect)
+
+	if ax.rectangles is None:
+		ax.rectangles = {node_identifier: [original_x0, total_node_width, y0, total_node_height]}
+	else:
+		ax.rectangles[node_identifier] = [original_x0, total_node_width, y0, total_node_height]
+
+	return total_node_width, total_node_height, extended_rectangles
 
 def plot_pfg_tree(tree,
 		min_timestamp,
@@ -532,7 +626,7 @@ def plot_pfg_tree(tree,
 	colours = cm.get_cmap("Reds")
 
 	# There should be a colour for each 'original parent'
-	node_colour_mapping = tree.assign_colour_indexes_to_nodes(tree.root_nodes, len(cpus))
+	node_colour_mapping = tree.node_colour_mapping
 
 	maximum_colour = 0.75;
 	minimum_colour = 0.00;
@@ -553,6 +647,7 @@ def plot_pfg_tree(tree,
 	ax.rectangles = {}
 	ax.plotted_bars = []
 	ax.highlighted_rectangle = None
+	ax.bar_texts = []
 	
 	ax.counters_line_map = {}
 
@@ -608,12 +703,21 @@ def plot_pfg_tree(tree,
 	# The root nodes are considered siblings
 	sibling_node_sets = [tree.root_nodes]
 
+
+	# Each sibling set may produce some extension rectangles
+	# The extensions should be plotted starting from the end of the final true rectangle, at each level
+	final_x_position_by_y = {}
+	extension_rectangles_by_y = {}
+	
 	# Processes each set of siblings, using the alignments given by their parent
 	while len(sibling_node_sets) > 0:
 
 		next_sibling_node_sets = []
 
 		for sibling_node_set in sibling_node_sets:
+
+			extended_rectangles = []
+			siblings_y_value = None
 
 			accumulated_sibling_width = 0.0
 			for sibling_idx, node in enumerate(sibling_node_set):
@@ -622,7 +726,7 @@ def plot_pfg_tree(tree,
 				base_x_position = 0.0
 				if node.ancestor_alignment_node is not None:
 					base_x_position = node.ancestor_alignment_node.start_x
-				
+
 				x_position = base_x_position + accumulated_sibling_width
 
 				# What is my y position?
@@ -630,11 +734,15 @@ def plot_pfg_tree(tree,
 				parent_name = "None"
 				if node.parent_node is not None:
 					y_position = node.parent_node.start_y + node.parent_node.height
+
+				if siblings_y_value is None:
+					siblings_y_value = y_position
+
 				if node.original_parent_node is not None:
 					parent_name = " and ".join(["("+part.name+")" for part in node.original_parent_node.node_partitions])
 
 				# Plot the node
-				width, height = plot_pfg_node(ax,
+				width, height, node_extended_rectangles = plot_pfg_node(ax,
 					node,
 					x_position,
 					y_position,
@@ -651,6 +759,11 @@ def plot_pfg_tree(tree,
 					tree.colour_mode,
 					counters
 					)
+				logging.trace("Plotting a realised rectangle (%s with parent %s) at y=%s and x=%s to %s",
+					parent_name, node.node_partitions[0].name,
+					y_position, x_position, x_position+width)
+
+				extended_rectangles.extend(node_extended_rectangles)
 
 				# write the positions of this node for my children/siblings
 				node.start_x = x_position
@@ -664,20 +777,62 @@ def plot_pfg_tree(tree,
 				if y_position + height > maximum_y:
 					maximum_y = y_position + height
 
+				if y_position in final_x_position_by_y:
+					if final_x_position_by_y[y_position] < (x_position + width):
+						final_x_position_by_y[y_position] = x_position + width
+				else:
+					final_x_position_by_y[y_position] = x_position + width
+
 				# get child nodes for the next plotting pass
 				next_sibling_node_sets.append(node.child_nodes)
+
+			if len(extended_rectangles) > 0:
+				if siblings_y_value in extension_rectangles_by_y:
+					extension_rectangles_by_y[siblings_y_value].extend(extended_rectangles)
+				else:
+					extension_rectangles_by_y[siblings_y_value] = extended_rectangles
 
 		# finished plotting the current sets of siblings
 		# set the next ones to plot
 		sibling_node_sets = next_sibling_node_sets
 		
+		# Now plot the extensions at the end of the siblings
+		for y_value, extension_rectangles in extension_rectangles_by_y.items():
+
+			x_value = final_x_position_by_y[y_value]
+		
+			accumulated_extension_width = 0.0
+			for extended_rect in extension_rectangles:
+			
+				extended_x_start = x_value + accumulated_extension_width
+				accumulated_extension_width += extended_rect[0]
+
+				logging.trace("Plotting an extension rectangle (%s with parent %s) at y=%s and x=%s to %s",
+					parent_name, node.node_partitions[0].name,
+					y_value, extended_x_start, extended_x_start+extended_rect[0])
+
+				extended_rect_patch = patches.Rectangle(
+					(extended_x_start,y_value),
+					extended_rect[0],
+					extended_rect[1],
+					linewidth=1,
+					edgecolor=extended_rect[2],
+					facecolor=extended_rect[3],
+					gid=None,
+					zorder=10,
+					picker=True)
+				
+				extended_rect_patch.colour_options = extended_rect[5]
+				ax.add_patch(extended_rect_patch)
+				ax.plotted_bars.append(extended_rect_patch)
+				text = PFGBarText(ax, extended_x_start, extended_x_start+extended_rect[0], y_value, y_value+extended_rect[1], extended_rect[4], 0.05)
+
 	# Now display	
 	ax.set_facecolor((0.9, 0.9, 0.9))
 
 	if x_bounds is None:
 		ax.set_xlim([0,maximum_x])
 	else:
-
 		maximum_x_cycles = x_bounds[1]
 		coefficient = maximum_x_cycles/max_timestamp
 
@@ -699,6 +854,12 @@ def plot_pfg_tree(tree,
 		logging.info("Displaying interactive plot.")
 		plt.show()
 	else:
+
+		# If we aren't displaying a window, then the resize event doesn't trigger on each of the bar texts
+		# Therefore manually trigger the calls to make sure they are positioned correctly before saving
+		for bar_text in ax.bar_texts:
+			bar_text.__call__(None)
+
 		logging.info("Saving plot to %s.", output_file)
 		fig.savefig(output_file, format="png", dpi=400, bbox_inches="tight")
 

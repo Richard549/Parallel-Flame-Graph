@@ -2,7 +2,7 @@ from argparse import ArgumentParser, ArgumentTypeError
 from collections import defaultdict
 import logging
 
-from PfgTree import PFGTree, TransformationOption, ColourMode
+from PfgTree import PFGTree, TransformationOption, ColourMode, calculate_nodes_differential
 from PfgTracefile import process_events, count_function_calls
 from PfgPlotting import plot_pfg_tree, HeightDisplayOption
 from PfgUtil import initialise_logging, debug_mode, LogLevelOption
@@ -51,6 +51,8 @@ def run_pfg(
 	else:
 		transformed = False
 		logging.info("The transformation option %s is not yet implemented. Proceeding with no tree transformation.", transformation.name)
+	
+	tree.assign_colour_indexes_to_nodes(tree.root_nodes, len(cpus))
 
 	if debug_mode() and transformed:
 		logging.debug("Printing post-transformation tree:")	
@@ -66,6 +68,102 @@ def run_pfg(
 		output_file,
 		x_bounds,
 		counters)
+
+def run_pfg_differential(
+		tracefile_tar,
+		tracefile_ref,
+		transformation,
+		height_display_option,
+		output_file,
+		x_bounds
+		):
+
+	reference_tree = None	
+	target_tree = None	
+
+	min_timestamp_overall = None
+	max_timestamp_overall = None
+	cpus_overall = None
+	counters_overall = None
+
+	for tracefile in [tracefile_ref, tracefile_tar]:
+
+		id_str = "target"
+		if tracefile == tracefile_ref:
+			id_str = "reference"
+
+		logging.info("Parsing %s tracefile.", id_str)
+		(top_level_entities,
+			unique_groups,
+			max_depth,
+			min_timestamp,
+			max_timestamp,
+			cpus,
+			counters) = process_events(tracefile)
+
+		if min_timestamp_overall is None or min_timestamp < min_timestamp_overall:
+			min_timestamp_overall = min_timestamp
+		if max_timestamp_overall is None or max_timestamp > max_timestamp_overall:
+			max_timestamp_overall = max_timestamp
+		if cpus_overall is None:
+			cpus_overall = cpus
+		if counters_overall is None:
+			counters_overall = counters
+
+		logging.info("Generating the %s tree.", id_str)
+		tree = PFGTree(top_level_entities)
+		tree.colour_mode = ColourMode.BY_PARALLELISM
+
+		if debug_mode():
+			logging.debug("Printing %s tree:", id_str)	
+			tree.print_tree()
+
+		transformed = True
+		if transformation == TransformationOption.NONE:
+			transformed = False
+			logging.info("Applying no tree transformation on %s.", id_str)	
+		elif transformation == TransformationOption.AGGREGATE_CALLS:
+			logging.info("Transforming %s tree to aggregate repeated function calls into single nodes.", id_str)	
+			tree.transform_tree_aggregate_stack_frames()
+		elif transformation == TransformationOption.MERGE_CALLS_ACROSS_CPUS:
+			logging.info("Transforming %s tree to aggregate sibling function calls executed on different CPUs.", id_str)
+			tree.transform_tree_aggregate_siblings_across_cpus()
+		elif transformation == TransformationOption.VERTICAL_STACK_CPU:
+			logging.info("Transforming %s tree to stack CPU entities vertically.", id_str)	
+			tree.transform_tree_stack_cpu_vertically()
+		elif transformation == TransformationOption.COLLAPSE_GROUPS:
+			logging.info("Transforming %s tree to merge edge-connected nodes across CPUs by function call, and collapsing to fit wallclock.", id_str)	
+			tree.transform_tree_collapse_groups()
+		else:
+			transformed = False
+			logging.info("The transformation option %s is not yet implemented. Proceeding with no tree transformation on %s.", transformation.name, id_str)
+
+		if debug_mode() and transformed:
+			logging.debug("Printing post-transformation %s tree:", id_str)	
+			tree.print_tree()
+	
+		tree.assign_colour_indexes_to_nodes(tree.root_nodes, len(cpus))
+
+		if tracefile == tracefile_ref:
+			reference_tree = tree
+		else:
+			target_tree = tree
+
+	# So I have the two trees, transform one with respect to the other
+	calculate_nodes_differential(reference_tree.root_nodes, target_tree.root_nodes)
+
+	logging.info("Success")
+
+	logging.info("Plotting the differential graph.")
+
+	plot_pfg_tree(reference_tree,
+		min_timestamp_overall,
+		max_timestamp_overall,
+		cpus_overall,
+		height_display_option,
+		output_file,
+		x_bounds,
+		counters_overall)
 
 def transformation_option(input_string):
 	transform_option_int = 0
@@ -100,7 +198,8 @@ def parse_args():
 	optional = parser._action_groups.pop() # will return the default 'optional' options-group (including the 'help' option)
 
 	required = parser.add_argument_group('required arguments')
-	required.add_argument('-f', '--tracefile', required=True, help="Filename to parse for events (as a CSV).")
+	required.add_argument('-f', '--tracefile', required=True, help="Target filename to parse for events (as a CSV).")
+	required.add_argument('-r', '--reference_tracefile', required=False, help="Reference filename to use as reference in differential analysis of the target tracefile.")
 
 	tf_options_str = ", ".join([str(member.value) + "=" + str(name) for name,member in TransformationOption.__members__.items()])
 	height_options_str = ", ".join([str(member.value) + "=" + str(name) for name,member in HeightDisplayOption.__members__.items()])
@@ -120,9 +219,9 @@ def parse_args():
 
 	args = parser.parse_args()
 
-	return args.tracefile, args.transform, args.logfile, args.log_level, args.tee, args.height_option, args.output, args.width, args.function_breakdown
+	return args.tracefile, args.reference_tracefile, args.transform, args.logfile, args.log_level, args.tee, args.height_option, args.output, args.width, args.function_breakdown
 
-tracefile, transformation_type, logfile, log_level, tee_mode, height_option, output_file, xaxis_bounds_str, function_summary = parse_args()
+tracefile, reference_tracefile, transformation_type, logfile, log_level, tee_mode, height_option, output_file, xaxis_bounds_str, function_summary = parse_args()
 initialise_logging(logfile, log_level, tee_mode)
 
 logging.info("Running Parallel Flame Graph for %s", tracefile)
@@ -142,8 +241,12 @@ if function_summary is True:
 	for function, number in function_counts.items():
 		logging.info("%s:%d", function, number)
 	logging.info("Done")
-
 else:
-	run_pfg(tracefile, transformation_type, height_option, output_file, bounds)
+
+	if reference_tracefile is None:
+		run_pfg(tracefile, transformation_type, height_option, output_file, bounds)
+	else:
+		run_pfg_differential(tracefile, reference_tracefile, transformation_type, height_option, output_file, bounds)
+
 	logging.info("Done")
 
