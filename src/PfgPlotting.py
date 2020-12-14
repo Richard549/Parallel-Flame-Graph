@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import matplotlib.lines as lines
 import matplotlib.colors as mcolors
 from matplotlib import cm
 from matplotlib.transforms import Bbox
@@ -16,6 +17,7 @@ from PfgTree import ColourMode
 import datetime
 
 PUSH_DIFFERENTIAL_EXTENSIONS_TO_END = True
+EXTENSIONS_ALPHA = 0.2
 
 class HeightDisplayOption(Enum):
 	CONSTANT = auto()
@@ -323,6 +325,7 @@ def plot_pfg_node(
 		colour_values,
 		cpus,
 		node_colour_mapping,
+		normalised_colour_transform_per_event,
 		colour_mode,
 		counters
 		):
@@ -354,8 +357,7 @@ def plot_pfg_node(
 	elif colour_mode == ColourMode.BY_PARALLELISM:
 		colour_identifier = weighted_arithmetic_mean_parallelism
 	elif colour_mode == ColourMode.BY_EVENT_VALUE:
-		# Default event is the first one
-		colour_identifier = node.node_partitions[0].per_event_values[0]
+		colour_identifier = node.node_partitions[0].per_event_values[max(node.node_partitions[0].per_event_values.keys())]
 	else:
 		logging.error("Colour mode not supported.")
 		raise NotImplementedError()
@@ -411,22 +413,32 @@ def plot_pfg_node(
 				maximum_colour = colour_values[1]
 
 				colour_identifier = part.per_event_values[event_idx]
+				colour_value = (maximum_colour + minimum_colour)/2.0
 
-				min_colour_identifier = min(list(node_colour_mapping[event_idx].keys()))
-				max_colour_identifier = max(list(node_colour_mapping[event_idx].keys()))
-				if max_colour_identifier == min_colour_identifier:
-					colour_value = minimum_colour
+				# we only use the transform if we have a sensible 0-point value (i.e. 0 differential)
+				if len(normalised_colour_transform_per_event) > 0:
+					colour_transform = normalised_colour_transform_per_event[event_idx]
+					colour_value = colour_transform(colour_identifier) # this is in range [0.0, 1.0]
+					colour_value = minimum_colour + (colour_value * (maximum_colour - minimum_colour))
+
 				else:
-					colour_value = minimum_colour + ((float(colour_identifier) / (max_colour_identifier-min_colour_identifier)) * (maximum_colour-minimum_colour))
+					# otherwise, just plot colours with respect to the distribution of values
+					min_colour_identifier = min(list(node_colour_mapping[event_idx].keys()))
+					max_colour_identifier = max(list(node_colour_mapping[event_idx].keys()))
+					if max_colour_identifier == min_colour_identifier:
+						colour_value = minimum_colour
+					else:
+						colour_value = minimum_colour + (((float(colour_identifier))  / (max_colour_identifier-min_colour_identifier)) * (maximum_colour-minimum_colour))
 
-				'''
-				logging.trace("Minimum value %s, maximum value %s, and this node (%s) value %s, gives colour_value %s",
+				"""
+				logging.debug("Minimum value for %s is %s, maximum value %s, and this node (%s) value %s, gives colour_value %s",
+					counters[event_idx],
 					sizeof_fmt(min_colour_identifier,suffix=""),
 					sizeof_fmt(max_colour_identifier,suffix=""),
 					part.name,
 					sizeof_fmt(colour_identifier,suffix=""),
 					colour_value)
-				'''
+				"""
 
 				facecolour = colours(colour_value)
 
@@ -438,16 +450,22 @@ def plot_pfg_node(
 			maximum_colour = colour_values[1]
 
 			colour_identifier = weighted_arithmetic_mean_parallelism
+			if node.differential_parallelism is not None:
+				colour_identifier = node.differential_parallelism
+				weighted_arithmetic_mean_parallelism = colour_identifier
 
-			#min_colour_identifier = min(list(node_colour_mapping[-1].keys()))
-			min_colour_identifier = 1.0
-			max_colour_identifier = float(len(cpus))
-
-			colour_value = None
-			if max_colour_identifier == min_colour_identifier:
-				colour_value = maximum_colour
+			# Same as above, if no differential then compute relative to distribution
+			if len(normalised_colour_transform_per_event) > 0:
+				colour_transform = normalised_colour_transform_per_event[-1]
+				colour_value = colour_transform(colour_identifier) # this is in range [0.0, 1.0]
+				colour_value = minimum_colour + (colour_value * (maximum_colour - minimum_colour))
 			else:
-				colour_value = minimum_colour + ((float(colour_identifier) / (max_colour_identifier-min_colour_identifier)) * (maximum_colour-minimum_colour))
+				min_colour_identifier = 1.0
+				max_colour_identifier = float(len(cpus))
+
+				colour_value = (maximum_colour-minimum_colour)/2.0
+				if max_colour_identifier != min_colour_identifier:
+					colour_value = minimum_colour + ((float(colour_identifier) / (max_colour_identifier-min_colour_identifier)) * (maximum_colour-minimum_colour))
 
 			'''
 			logging.trace("Minimum value %s, maximum value %s, and this node (%s) value %s, gives colour_value %s",
@@ -474,13 +492,14 @@ def plot_pfg_node(
 				# I need to divide the rectangle into an inner fast-interval and a low-alpha reference remainder
 
 				#inner_part_width = width_to_interval_ratio * (part.wallclock_duration + node.differential_interval)
+				logging.info("INNER REALISED PART %s from x %s to %s and y %s to %s has facecolor %s", part.name, x0, x0+part_width, y0, y0+part_height, colour_options[0])
 				inner_rect = patches.Rectangle(
 					(x0,y0),
 					part_width,
 					part_height,
 					linewidth=1,
 					edgecolor=edgecolour,
-					facecolor=colour_options[0],
+					facecolor=colour_options[-1],
 					gid=None,
 					zorder=10,
 					picker=True)
@@ -492,29 +511,36 @@ def plot_pfg_node(
 			
 				# TODO The extended part should be moved to the end of the siblings!
 				extended_part_width = width_to_interval_ratio * abs(node.differential_interval)
+
+				extended_colour_options = []
+				for option_idx in range(len(colour_options)):
+					extended_facecolour_option = list(colour_options[option_idx])
+					extended_facecolour_option[3] = EXTENSIONS_ALPHA
+					extended_facecolour_option = tuple(extended_facecolour_option)
+					extended_colour_options.append(extended_facecolour_option)
+				
 				extended_edgecolour = list(edgecolour)
-				extended_facecolour = list(colour_options[0])
-				extended_edgecolour[3] = 0.05
-				extended_facecolour[3] = 0.05
+				extended_edgecolour[3] = EXTENSIONS_ALPHA
 				extended_edgecolour = tuple(extended_edgecolour)
-				extended_facecolour = tuple(extended_facecolour)
 
 				if PUSH_DIFFERENTIAL_EXTENSIONS_TO_END == False:
+
+					logging.info("OUTER EXTENSION PART %s from x %s to %s and y %s to %s has facecolor %s", part.name, x0+part_width, x0+part_width+extended_part_width, y0, y0+part_height, extended_colour_options[0])
 					extended_rect = patches.Rectangle(
 						(x0+part_width,y0),
 						extended_part_width,
 						part_height,
 						linewidth=1,
 						edgecolor=extended_edgecolour,
-						facecolor=extended_facecolour,
+						facecolor=extended_colour_options[-1],
 						gid=None,
 						zorder=10,
 						picker=True)
 
-					extended_rect.colour_options = colour_options
+					extended_rect.colour_options = extended_colour_options
 					ax.add_patch(extended_rect)
 					ax.plotted_bars.append(extended_rect)
-					text = PFGBarText(ax, x0+part_width, x0+part_width+extended_part_width, y0, y0+part_height, part.name, 0.05)
+					text = PFGBarText(ax, x0+part_width, x0+part_width+extended_part_width, y0, y0+part_height, part.name, EXTENSIONS_ALPHA)
 
 					part_width += extended_part_width
 					total_realised_wallclock_duration += abs(node.differential_interval)
@@ -524,42 +550,68 @@ def plot_pfg_node(
 						extended_part_width,
 						part_height,
 						extended_edgecolour,
-						extended_facecolour,
+						extended_colour_options[-1],
 						part.name,
-						colour_options
+						extended_colour_options
 					]
 					extended_rectangles.append(extended_rect_info)
 
 			else:
 				# it is longer in the target so I need to extend!
-				# TODO TODO TODO
+				# first create a total rectangle
+
+				logging.info("INNER REALISED PART %s from x %s to %s and y %s to %s has facecolor %s", part.name, x0, x0+part_width, y0, y0+part_height, colour_options[0])
+				extension_part_width = width_to_interval_ratio * node.differential_interval
 				rect = patches.Rectangle(
 					(x0,y0),
-					part_width,
+					part_width+extension_part_width,
 					part_height,
 					linewidth=1,
 					edgecolor=edgecolour,
-					facecolor=colour_options[0],
+					facecolor=colour_options[-1],
 					#facecolor=colours(colour_values[0]) if node.differential_interval < 0 else colours(colour_values[1]),
 					gid=None,
 					zorder=10,
 					picker=True)
 
 				rect.colour_options = colour_options
-
 				ax.add_patch(rect)
 				ax.plotted_bars.append(rect)
+				text = PFGBarText(ax, x0, x0+part_width+extension_part_width, y0, y0+part_height, part.name)
 
-				text = PFGBarText(ax, x0, x0+part_width, y0, y0+part_height, part.name)
+				# create an extension rectangle with no fill but hatching
+				logging.info("INNER EXTENSION PART %s from x %s to %s and y %s to %s has facecolor %s", part.name, x0+part_width, x0+part_width+extension_part_width, y0, y0+part_height, colour_options[0])
+				rect_extension = patches.Rectangle(
+					(x0+part_width,y0),
+					extension_part_width,
+					part_height,
+					linewidth='0',
+					edgecolor='0',
+					facecolor='none',
+					hatch='/',
+					#facecolor=colours(colour_values[0]) if node.differential_interval < 0 else colours(colour_values[1]),
+					gid=None,
+					zorder=10,
+					picker=True)
+
+				ax.add_patch(rect_extension)
+				# I don't ever need to change the colours of this, as it is transparent facecoloured
+				#rect_extension.colour_options = colour_options
+				#ax.plotted_bars.append(rect_extension)
+				#text_extension = PFGBarText(ax, x0+part_width, x0+part_width+extension_part_width, y0, y0+part_height, part.name)
+
+				part_width += extension_part_width
+				total_realised_wallclock_duration += node.differential_interval
 
 		else:
+			logging.info("NORMAL REALISED PART %s from x %s to %s and y %s to %s has facecolor %s", part.name, x0, x0+part_width, y0, y0+part_height, colour_options[0])
 			rect = patches.Rectangle(
 				(x0,y0),
 				part_width,
 				part_height,
 				linewidth=1,
 				edgecolor=edgecolour,
-				facecolor=colour_options[0],
+				facecolor=colour_options[-1],
 				#facecolor=colours(colour_values[0]) if node.differential_interval < 0 else colours(colour_values[1]),
 				gid=None,
 				zorder=10,
@@ -610,8 +662,8 @@ def plot_pfg_node(
 	return total_node_width, total_node_height, extended_rectangles
 
 def plot_pfg_tree(tree,
-		min_timestamp,
-		max_timestamp,
+		min_timestamps,
+		max_timestamps,
 		cpus,
 		height_option,
 		output_file=None,
@@ -622,14 +674,27 @@ def plot_pfg_tree(tree,
 	if len(tree.root_nodes) == 0:
 		logging.warn("There are no root nodes in the tree.")
 		return
-
-	colours = cm.get_cmap("Reds")
-
-	# There should be a colour for each 'original parent'
+	
 	node_colour_mapping = tree.node_colour_mapping
+	normalised_colour_transform_per_event = []
 
-	maximum_colour = 0.75;
-	minimum_colour = 0.00;
+	maximum_colour = 0.7;
+	minimum_colour = 0.2;
+	colours = cm.get_cmap("Reds")
+	if len(max_timestamps) > 1:
+		# It is differential
+		colours = cm.get_cmap("RdBu_r")
+		maximum_colour = 0.9;
+		minimum_colour = 0.1;
+		for counter_idx, counter_name in counters.items():
+			min_colour_identifier = min(list(node_colour_mapping[counter_idx].keys()))
+			max_colour_identifier = max(list(node_colour_mapping[counter_idx].keys()))
+			normalised_colour_transform_per_event.append(mcolors.DivergingNorm(vmin=min_colour_identifier, vmax=max_colour_identifier, vcenter=0.0))
+		# Add one for parallelism
+		min_colour_identifier = -len(cpus)
+		max_colour_identifier = len(cpus)
+		normalised_colour_transform_per_event.append(mcolors.DivergingNorm(vmin=min_colour_identifier, vmax=max_colour_identifier, vcenter=0.0))
+
 	colour_step = (maximum_colour-minimum_colour)/len(node_colour_mapping)
 	colour_values = [(i+1)*colour_step + minimum_colour for i in range(len(node_colour_mapping))]
 
@@ -651,7 +716,7 @@ def plot_pfg_tree(tree,
 	
 	ax.counters_line_map = {}
 
-	default_counter_idx = 0
+	default_counter_idx = len(counters)
 	if len(counters) > 0:
 
 		counter_patches = []
@@ -661,7 +726,7 @@ def plot_pfg_tree(tree,
 			counter_patch = patches.Patch(color=color, label=counter_name, picker=True)
 			counter_patches.append(counter_patch)
 
-	color = "Red" if len(counters) == 0 else "none"
+	color = "Red" if (len(counters) == 0 or default_counter_idx == len(counters)) else "none"
 	counter_patch = patches.Patch(color=color, label="PARALLELISM", picker=True)
 	counter_patches.append(counter_patch)
 
@@ -702,7 +767,6 @@ def plot_pfg_tree(tree,
 
 	# The root nodes are considered siblings
 	sibling_node_sets = [tree.root_nodes]
-
 
 	# Each sibling set may produce some extension rectangles
 	# The extensions should be plotted starting from the end of the final true rectangle, at each level
@@ -756,6 +820,7 @@ def plot_pfg_tree(tree,
 					colour_values,
 					cpus,
 					node_colour_mapping,
+					normalised_colour_transform_per_event,
 					tree.colour_mode,
 					counters
 					)
@@ -796,36 +861,40 @@ def plot_pfg_tree(tree,
 		# set the next ones to plot
 		sibling_node_sets = next_sibling_node_sets
 		
-		# Now plot the extensions at the end of the siblings
-		for y_value, extension_rectangles in extension_rectangles_by_y.items():
+	# Now plot the extensions at the end of the siblings
+	for y_value, extension_rectangles in extension_rectangles_by_y.items():
 
-			x_value = final_x_position_by_y[y_value]
+		x_value = final_x_position_by_y[y_value]
+	
+		accumulated_extension_width = 0.0
+		for extended_rect in extension_rectangles:
 		
-			accumulated_extension_width = 0.0
-			for extended_rect in extension_rectangles:
+			extended_x_start = x_value + accumulated_extension_width
+			accumulated_extension_width += extended_rect[0]
+
+			logging.trace("Plotting an extension rectangle (%s with parent %s) at y=%s and x=%s to %s",
+				parent_name, extended_rect[4],
+				y_value, extended_x_start, extended_x_start+extended_rect[0])
+
+			logging.info("PART %s from x %s to %s and y %s to %s has facecolor %s", extended_rect[4], extended_x_start, extended_x_start+extended_rect[0], y_value, y_value+extended_rect[1], extended_rect[3])
+			extended_rect_patch = patches.Rectangle(
+				(extended_x_start,y_value),
+				extended_rect[0],
+				extended_rect[1],
+				linewidth=1,
+				edgecolor=extended_rect[2],
+				facecolor=extended_rect[3],
+				gid=None,
+				zorder=10,
+				picker=True)
 			
-				extended_x_start = x_value + accumulated_extension_width
-				accumulated_extension_width += extended_rect[0]
+			extended_rect_patch.colour_options = extended_rect[5]
+			ax.add_patch(extended_rect_patch)
+			ax.plotted_bars.append(extended_rect_patch)
+			text = PFGBarText(ax, extended_x_start, extended_x_start+extended_rect[0], y_value, y_value+extended_rect[1], extended_rect[4], EXTENSIONS_ALPHA)
 
-				logging.trace("Plotting an extension rectangle (%s with parent %s) at y=%s and x=%s to %s",
-					parent_name, node.node_partitions[0].name,
-					y_value, extended_x_start, extended_x_start+extended_rect[0])
-
-				extended_rect_patch = patches.Rectangle(
-					(extended_x_start,y_value),
-					extended_rect[0],
-					extended_rect[1],
-					linewidth=1,
-					edgecolor=extended_rect[2],
-					facecolor=extended_rect[3],
-					gid=None,
-					zorder=10,
-					picker=True)
-				
-				extended_rect_patch.colour_options = extended_rect[5]
-				ax.add_patch(extended_rect_patch)
-				ax.plotted_bars.append(extended_rect_patch)
-				text = PFGBarText(ax, extended_x_start, extended_x_start+extended_rect[0], y_value, y_value+extended_rect[1], extended_rect[4], 0.05)
+			if extended_x_start+extended_rect[0] > maximum_x:
+				maximum_x = extended_x_start+extended_rect[0]
 
 	# Now display	
 	ax.set_facecolor((0.9, 0.9, 0.9))
@@ -834,7 +903,7 @@ def plot_pfg_tree(tree,
 		ax.set_xlim([0,maximum_x])
 	else:
 		maximum_x_cycles = x_bounds[1]
-		coefficient = maximum_x_cycles/max_timestamp
+		coefficient = float(maximum_x_cycles)/max(max_timestamps)
 
 		ax.set_xlim([0, coefficient*maximum_x])
 
@@ -843,12 +912,22 @@ def plot_pfg_tree(tree,
 	# Create the hover-over
 	hover_text = PFGHoverText(ax)
 
-	wallclock_duration = sizeof_fmt(max_timestamp - min_timestamp)
 	ax.set_title("OpenMP Parallel FlameGraph")
 
+	x_tick_positions = [0]
+	x_tick_labels = [sizeof_fmt(0,suffix="")]
+
+	for i in range(len(max_timestamps)):
+		min_timestamp = min_timestamps[i]
+		max_timestamp = max_timestamps[i]
+		x_tick_pos = width_to_interval_ratio * (max_timestamp - min_timestamp)
+		x_tick_label = sizeof_fmt(max_timestamp - min_timestamp, suffix="")
+		x_tick_positions.append(x_tick_pos)
+		x_tick_labels.append(x_tick_label)
+
 	ax.set_yticks([])
-	ax.set_xticks([0,top_level_width])
-	ax.set_xticklabels((str(sizeof_fmt(0)), str(sizeof_fmt(max_timestamp - min_timestamp))))
+	ax.set_xticks(x_tick_positions)
+	ax.set_xticklabels(x_tick_labels)
 
 	if output_file is None:
 		logging.info("Displaying interactive plot.")

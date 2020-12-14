@@ -461,7 +461,7 @@ def parse_trace(filename,
 							rate_name = event + "_RATE"
 							rate_event_idx = list(derived_counters.values()).index(rate_name) + len(counters)
 							
-							value = int(float(split_line[counter_value_offset + event_idx]) / float(duration_counter_value))
+							value = float(split_line[counter_value_offset + event_idx]) / float(duration_counter_value)
 							frame.add_event_value(cpu, rate_event_idx, value)
 			
 			elif split_line[0] == "counter_description":

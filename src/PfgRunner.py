@@ -61,8 +61,8 @@ def run_pfg(
 	logging.info("Plotting the tree.")
 
 	plot_pfg_tree(tree,
-		min_timestamp,
-		max_timestamp,
+		[min_timestamp],
+		[max_timestamp],
 		cpus,
 		height_display_option,
 		output_file,
@@ -81,8 +81,9 @@ def run_pfg_differential(
 	reference_tree = None	
 	target_tree = None	
 
-	min_timestamp_overall = None
-	max_timestamp_overall = None
+	min_timestamps = []
+	max_timestamps = []
+
 	cpus_overall = None
 	counters_overall = None
 
@@ -101,10 +102,9 @@ def run_pfg_differential(
 			cpus,
 			counters) = process_events(tracefile)
 
-		if min_timestamp_overall is None or min_timestamp < min_timestamp_overall:
-			min_timestamp_overall = min_timestamp
-		if max_timestamp_overall is None or max_timestamp > max_timestamp_overall:
-			max_timestamp_overall = max_timestamp
+		min_timestamps.append(min_timestamp)
+		max_timestamps.append(max_timestamp)
+
 		if cpus_overall is None:
 			cpus_overall = cpus
 		if counters_overall is None:
@@ -150,15 +150,16 @@ def run_pfg_differential(
 			target_tree = tree
 
 	# So I have the two trees, transform one with respect to the other
-	calculate_nodes_differential(reference_tree.root_nodes, target_tree.root_nodes)
+	calculate_nodes_differential(reference_tree.root_nodes, target_tree.root_nodes, counters_overall)
 
-	logging.info("Success")
+	# Because I have calculated differential event values, I need to recalibrate the colour mappings
+	reference_tree.assign_colour_indexes_to_nodes(reference_tree.root_nodes, len(cpus_overall))
 
 	logging.info("Plotting the differential graph.")
 
 	plot_pfg_tree(reference_tree,
-		min_timestamp_overall,
-		max_timestamp_overall,
+		min_timestamps,
+		max_timestamps,
 		cpus_overall,
 		height_display_option,
 		output_file,

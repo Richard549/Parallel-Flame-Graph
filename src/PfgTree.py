@@ -158,9 +158,10 @@ class PFGTreeNode:
 		first_interval = PFGTreeNodeExecutionInterval(name, cpu, wallclock_duration, parallelism_intervals, per_event_values)
 		self.execution_intervals = [first_interval]
 
-		# A negative differential interval means we need an inner bar
-		# A positive differential interval means we need a bar extension
+		# Always differential as target - reference (meaning a negative interval is a speedup from reference)
 		self.differential_interval = None
+		self.differential_parallelism = None
+		#self.per_event_value_differential = None
 
 		# for plotting
 		self.start_x = None
@@ -835,7 +836,7 @@ class PFGTree:
 
 		return mapped_nodes
 
-def calculate_nodes_differential(reference_nodes, target_nodes):
+def calculate_nodes_differential(reference_nodes, target_nodes, counters):
 
 	# TODO should have some mapping algorithm to determine node pairs, then just iterate through the node pairs
 	# For now, assuming isomorphism, so we can just step through both as a depth first search and we should land on the 'same' node at each step
@@ -845,7 +846,12 @@ def calculate_nodes_differential(reference_nodes, target_nodes):
 		# Adjust ref_node
 	
 	if len(reference_nodes) != len(target_nodes):
-		logging.error("Found %s reference nodes but %s target nodes. Differential comparison is currently assuming isomorphism. Aborting.")
+		logging.error("Found %s reference nodes but %s target nodes. Differential comparison is currently assuming isomorphism. Aborting.", len(reference_nodes), len(target_nodes))
+		for ref_idx, ref_node in enumerate(reference_nodes):
+			logging.error("Ref node was %s", ref_node.node_partitions[0].name)
+		for ref_idx, tar_node in enumerate(target_nodes):
+			logging.error("Ref node was %s", ref_node.node_partitions[0].name)
+
 		raise ValueError()
 
 	for node_comparison_idx in range(len(reference_nodes)):
@@ -858,11 +864,36 @@ def calculate_nodes_differential(reference_nodes, target_nodes):
 
 		ref_node.differential_interval = tar_node_wallclock - ref_node_wallclock
 
+		per_event_value_differential = {}
+		for event_idx, tar_value in tar_node.node_partitions[0].per_event_values.items():
+			ref_value = ref_node.node_partitions[0].per_event_values[event_idx]
+			per_event_value_differential[event_idx] = tar_value - ref_value
+			logging.debug("Target node %s at depth %s had %s more %s than the reference", ref_node.node_partitions[0].name, ref_node.original_depth, tar_value-ref_value, counters[event_idx])
+
+		ref_node.node_partitions[0].per_event_values = per_event_value_differential
+
+		# add differential value for parallelism
+		num = 0
+		denom = 0
+		for parallelism, interval in tar_node.node_partitions[0].parallelism_intervals.items():
+			num += parallelism*interval
+			denom += interval
+		target_weighted_arithmetic_mean_parallelism = float(num) / denom
+		
+		num = 0
+		denom = 0
+		for parallelism, interval in ref_node.node_partitions[0].parallelism_intervals.items():
+			num += parallelism*interval
+			denom += interval
+		reference_weighted_arithmetic_mean_parallelism = float(num) / denom
+
+		ref_node.differential_parallelism = target_weighted_arithmetic_mean_parallelism - reference_weighted_arithmetic_mean_parallelism
+
 		if ref_node.differential_interval < 0:
-			logging.debug("Target node %s at depth %s was faster than the reference by %s", ref_node.node_partitions[0].name, ref_node.original_depth, abs(ref_node.differential_interval))
+			logging.trace("Target node %s at depth %s was faster than the reference by %s", ref_node.node_partitions[0].name, ref_node.original_depth, abs(ref_node.differential_interval))
 		else:
-			logging.debug("Target node %s at depth %s was slower than the reference by %s", ref_node.node_partitions[0].name, ref_node.original_depth, ref_node.differential_interval)
+			logging.trace("Target node %s at depth %s was slower than the reference by %s", ref_node.node_partitions[0].name, ref_node.original_depth, ref_node.differential_interval)
 
 		if len(ref_node.child_nodes) > 0:
-			calculate_nodes_differential(ref_node.child_nodes, tar_node.child_nodes)
+			calculate_nodes_differential(ref_node.child_nodes, tar_node.child_nodes, counters)
 
