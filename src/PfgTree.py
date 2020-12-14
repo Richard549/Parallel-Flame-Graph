@@ -159,9 +159,9 @@ class PFGTreeNode:
 		self.execution_intervals = [first_interval]
 
 		# Always differential as target - reference (meaning a negative interval is a speedup from reference)
-		self.differential_interval = None
+		self.differential_interval = None # i.e. wallclock
 		self.differential_parallelism = None
-		#self.per_event_value_differential = None
+		self.differential_cpu_time = None
 
 		# for plotting
 		self.start_x = None
@@ -183,15 +183,16 @@ class PFGTreeNode:
 
 			if cpu_time == True or execution_interval.cpu == self.cpus[0]:
 				wallclock_durations_by_group[execution_interval.name] += execution_interval.duration
+
+				for event_idx, value in execution_interval.per_event_values.items():
+					per_event_values_by_group[execution_interval.name][event_idx] += value
+
+				for parallelism, interval in execution_interval.parallelism_intervals.items():
+					parallelism_intervals_by_group[execution_interval.name][parallelism] += interval 
 			
+			# could put more information here about the collapsed parallel information (currently only retaining the profiling information for the node with the longest wallclock from the group)
 			if execution_interval.cpu not in self.cpus:
 				self.cpus.append(execution_interval.cpu)
-
-			for parallelism, interval in execution_interval.parallelism_intervals.items():
-				parallelism_intervals_by_group[execution_interval.name][parallelism] += interval 
-			
-			for event_idx, value in execution_interval.per_event_values.items():
-				per_event_values_by_group[execution_interval.name][event_idx] += value
 
 			cpu_time_by_group[execution_interval.name] += execution_interval.duration
 
@@ -723,7 +724,7 @@ class PFGTree:
 			cpus = "[" + ",".join([str(cpu) for cpu in node.cpus]) + "]"
 			durations = "[" + ",".join([str(part.wallclock_duration) for part in node.node_partitions]) + "]"
 			cpu_times = "[" + ",".join([str(part.cpu_time) for part in node.node_partitions]) + "]"
-			parallelism_intervals = "[" + ",".join([str(list(part.parallelism_intervals.values())) for part in node.node_partitions]) + "]"
+			parallelism_intervals = "[" + ",".join([str(list(part.parallelism_intervals.items())) for part in node.node_partitions]) + "]"
 			parent_node_name = str(hex(id(node.original_parent_node))) + ":" + " and ".join([part.name for part in node.original_parent_node.node_partitions])
 
 			logging.debug("Depth %d node %d/%d on CPUs %s for durations %s with parallelism intervals %s and cpu times %s: %s with parent node [%s]",
@@ -746,7 +747,17 @@ class PFGTree:
 			name = str(hex(id(root_node))) + ":" + " and ".join([part.name for part in root_node.node_partitions])
 			cpus = "[" + ",".join([str(cpu) for cpu in root_node.cpus]) + "]"
 			durations = "[" + ",".join([str(part.wallclock_duration) for part in root_node.node_partitions]) + "]"
-			logging.debug("Descending root node %d/%d on CPUs %s for durations %s: %s", node_idx+1, len(self.root_nodes), cpus, durations, name)
+			cpu_times = "[" + ",".join([str(part.cpu_time) for part in root_node.node_partitions]) + "]"
+			parallelism_intervals = "[" + ",".join([str(list(part.parallelism_intervals.items())) for part in root_node.node_partitions]) + "]"
+
+			logging.debug("Descending root node %d/%d on CPUs %s for durations %s with parallelism intervals %s and cpu times %s: %s",
+				node_idx+1,
+				len(self.root_nodes),
+				cpus,
+				durations,
+				parallelism_intervals,
+				cpu_times,
+				name)
 
 			child_nodes = root_node.child_nodes
 			self.print_nodes(child_nodes, 1)
@@ -836,6 +847,48 @@ class PFGTree:
 
 		return mapped_nodes
 
+def generate_exclusive_parallelism_intervals(nodes):
+
+	for node in nodes:
+		if node.parent_node is not None:
+			for parallelism, interval in node.node_partitions[0].parallelism_intervals.items():
+				# remove the interval from the parent
+				node.parent_node.node_partitions[0].parallelism_intervals[parallelism] -= interval
+
+		# descend to this node's children and do the same
+		generate_exclusive_parallelism_intervals(node.child_nodes)
+
+# This function needs to do depth first search, and accumulate upwards!
+def generate_inclusive_event_counts(nodes, counters):
+
+	accumulated_counts = defaultdict(int)
+
+	for node in nodes:
+		node_event_counts = node.node_partitions[0].per_event_values
+
+		accumulated_child_counts = generate_inclusive_event_counts(node.child_nodes, counters)
+		
+		# add accumulated child counts to this node
+		for event, value in accumulated_child_counts.items():
+			node_event_counts[event] += value
+
+		# process the rates, which should be be an average not a sum
+		rate_events = [event for event in list(counters.values()) if "_RATE" in event]
+		for rate_event in rate_events:
+			event_idx = list(counters.values()).index(rate_event.replace("_RATE",""))
+			rate_event_idx = list(counters.values()).index(rate_event)
+			duration_event_idx = list(counters.values()).index("PAPI_TOT_CYC")
+
+			accumulated_event_count = node_event_counts[event_idx]
+			duration = node_event_counts[duration_event_idx]
+			node_event_counts[rate_event_idx] = float(accumulated_event_count) / duration
+
+		# add to the accumulated counts for the siblings
+		for event, value in node_event_counts.items():
+			accumulated_counts[event] += value
+
+	return accumulated_counts
+
 def calculate_nodes_differential(reference_nodes, target_nodes, counters):
 
 	# TODO should have some mapping algorithm to determine node pairs, then just iterate through the node pairs
@@ -888,6 +941,9 @@ def calculate_nodes_differential(reference_nodes, target_nodes, counters):
 		reference_weighted_arithmetic_mean_parallelism = float(num) / denom
 
 		ref_node.differential_parallelism = target_weighted_arithmetic_mean_parallelism - reference_weighted_arithmetic_mean_parallelism
+
+		# add differential value for total cpu time
+		ref_node.differential_cpu_time = tar_node.node_partitions[0].cpu_time - ref_node.node_partitions[0].cpu_time
 
 		if ref_node.differential_interval < 0:
 			logging.trace("Target node %s at depth %s was faster than the reference by %s", ref_node.node_partitions[0].name, ref_node.original_depth, abs(ref_node.differential_interval))

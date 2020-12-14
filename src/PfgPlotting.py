@@ -29,7 +29,7 @@ class HeightDisplayOption(Enum):
 """
 class PFGHoverText:
 	def __init__(self, ax):
-		self.hover_text = ax.text(1, 1, "", bbox=dict(facecolor='white', alpha=0.7), fontsize=6, zorder=100)
+		self.hover_text = ax.text(1, 1, "", bbox=dict(facecolor='white', alpha=1.0), fontsize=6, zorder=100)
 		self.cidmotion = ax.figure.canvas.mpl_connect('motion_notify_event', self.on_plot_hover)
 
 	def on_plot_hover(self, event):
@@ -52,12 +52,19 @@ class PFGHoverText:
 				self.hover_text.set_text("")
 				ax.figure.canvas.draw()
 			else:
-				self.hover_text.set_text(text)
-				self.hover_text.set_position((event.xdata, event.ydata))
-
 				# also highlight the rectangle of the parent!
 				# dodgy parsing for now
 				parent_identifier = text.split("Parent=[")[1].split("\n")[0].split(":")[-1].split("]")[0]
+
+				# I include the parent in the info text, but I don't really want to see it, so remove it by joining before/after
+				pre_parent = text.split("Parent=[")[0]
+				post_parent = "".join(text.split("Parent=[")[1].split("]")[1])
+				new_text = pre_parent + post_parent
+				new_text = new_text.replace("\n\n","\n")
+				self.hover_text.set_text(new_text)
+				
+				#self.hover_text.set_text(text)
+				self.hover_text.set_position((event.xdata, event.ydata))
 
 				if parent_identifier in ax.rectangles:
 					rectangle_coords = ax.rectangles[parent_identifier]
@@ -517,6 +524,10 @@ def plot_pfg_node(
 					extended_facecolour_option = list(colour_options[option_idx])
 					extended_facecolour_option[3] = EXTENSIONS_ALPHA
 					extended_facecolour_option = tuple(extended_facecolour_option)
+					logging.info(extended_facecolour_option)
+					# Making white
+					extended_facecolour_option = (1.0,1.0,1.0,EXTENSIONS_ALPHA)
+					logging.info(extended_facecolour_option)
 					extended_colour_options.append(extended_facecolour_option)
 				
 				extended_edgecolour = list(edgecolour)
@@ -628,18 +639,36 @@ def plot_pfg_node(
 	
 	total_node_width = width_to_interval_ratio * total_realised_wallclock_duration
 	
-	info_text = "Total wallclock duration: " + sizeof_fmt(total_wallclock_duration) + "\n"
-	info_text += "Total CPU time: " + sizeof_fmt(sum([part.cpu_time for part in node.node_partitions])) + "\n"
-	info_text += "Avg parallelism: " + str(weighted_arithmetic_mean_parallelism) + "\n"
-	info_text += "".join([part.name + ": " + sizeof_fmt(part.wallclock_duration) + "\n" for part in node.node_partitions]) + "\n"
+	info_text = "".join([part.name + ": " + sizeof_fmt(part.wallclock_duration) + "\n" for part in node.node_partitions]) + "\n"
+	if node.differential_interval is not None:
+		symbol = "+" if node.differential_interval >= 0.0 else ""
+		info_text = "".join([part.name + ": " + symbol + sizeof_fmt(node.differential_interval) + "\n" for part in node.node_partitions]) + "\n"
+
+	#info_text += "Wallclock duration: " + sizeof_fmt(total_wallclock_duration) + "\n"
+	symbol = "+" if node.differential_cpu_time is not None and node.differential_cpu_time >= 0.0 else ""
+	if node.differential_interval is not None:
+		info_text += "CPU time: " + symbol + sizeof_fmt(node.differential_cpu_time) + "\n"
+	else:
+		info_text += "CPU time: " + sizeof_fmt(sum([part.cpu_time for part in node.node_partitions])) + "\n"
+
+	symbol = "+" if node.differential_interval is not None and node.differential_interval >= 0.0 else ""
+
+	info_text += "Avg parallelism: " + symbol + str(weighted_arithmetic_mean_parallelism) + "\n\n"
 	info_text += "Parent=[" + str(parent_name) + ":" + str(parent_identifier) + "]\n\n"
 	for event_idx, event_name in counters.items():
-		info_text += event_name + ": " + sizeof_fmt(node.node_partitions[0].per_event_values[event_idx], suffix="") + "\n"
-		if event_idx + 1 == len(counters):
+
+		symbol = ""
+		if node.differential_interval is not None:
+			if node.node_partitions[0].per_event_values[event_idx] >= 0.0:
+				symbol = "+"
+		
+		info_text += event_name + ": " + symbol + sizeof_fmt(node.node_partitions[0].per_event_values[event_idx], suffix="")
+		if event_idx+1 < len(counters):
 			info_text += "\n"
-	wallclock_durations_by_cpu = node.get_per_cpu_wallclock_durations()
-	for cpu, duration in wallclock_durations_by_cpu.items():
-		info_text += str(cpu) + ": " + str(sizeof_fmt(duration)) + "\n"
+
+	#wallclock_durations_by_cpu = node.get_per_cpu_wallclock_durations()
+	#for cpu, duration in wallclock_durations_by_cpu.items():
+	#	info_text += str(cpu) + ": " + str(sizeof_fmt(duration)) + "\n"
 
 	# Invisible rectangle just for the hover-over text
 	rect = patches.Rectangle(
@@ -689,11 +718,13 @@ def plot_pfg_tree(tree,
 		for counter_idx, counter_name in counters.items():
 			min_colour_identifier = min(list(node_colour_mapping[counter_idx].keys()))
 			max_colour_identifier = max(list(node_colour_mapping[counter_idx].keys()))
-			normalised_colour_transform_per_event.append(mcolors.DivergingNorm(vmin=min_colour_identifier, vmax=max_colour_identifier, vcenter=0.0))
+			max_distance_from_zero = max(abs(min_colour_identifier), abs(max_colour_identifier))
+			normalised_colour_transform_per_event.append(mcolors.DivergingNorm(vmin=0.0-max_distance_from_zero, vmax=0.0+max_distance_from_zero, vcenter=0.0))
 		# Add one for parallelism
 		min_colour_identifier = -len(cpus)
 		max_colour_identifier = len(cpus)
-		normalised_colour_transform_per_event.append(mcolors.DivergingNorm(vmin=min_colour_identifier, vmax=max_colour_identifier, vcenter=0.0))
+		max_distance_from_zero = max(abs(min_colour_identifier), abs(max_colour_identifier))
+		normalised_colour_transform_per_event.append(mcolors.DivergingNorm(vmin=0.0-max_distance_from_zero, vmax=0.0+max_distance_from_zero, vcenter=0.0))
 
 	colour_step = (maximum_colour-minimum_colour)/len(node_colour_mapping)
 	colour_values = [(i+1)*colour_step + minimum_colour for i in range(len(node_colour_mapping))]
@@ -933,7 +964,6 @@ def plot_pfg_tree(tree,
 		logging.info("Displaying interactive plot.")
 		plt.show()
 	else:
-
 		# If we aren't displaying a window, then the resize event doesn't trigger on each of the bar texts
 		# Therefore manually trigger the calls to make sure they are positioned correctly before saving
 		for bar_text in ax.bar_texts:

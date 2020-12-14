@@ -369,6 +369,10 @@ def parse_trace(filename,
 				for interval in sorted(parallelism_tree.overlap(frame_start,frame_end)):
 					parallelism = interval[2]
 
+					# At the moment, ignore non-active time from the main cpu
+					if parallelism == 0:
+						parallelism = 1
+
 					start = interval[0]
 					if frame_start > interval[0]:
 						start = frame_start
@@ -463,6 +467,18 @@ def parse_trace(filename,
 							
 							value = float(split_line[counter_value_offset + event_idx]) / float(duration_counter_value)
 							frame.add_event_value(cpu, rate_event_idx, value)
+
+				# Add an exclusive event that is the duration
+				duration_event_idx = len(derived_counters)
+				if "WALLCLOCK" in derived_counters.values():
+					duration_event_idx = list(derived_counters.values()).index("WALLCLOCK")
+				else:
+					derived_counters[duration_event_idx] = "WALLCLOCK"
+
+				period_start = int(split_line[2])
+				period_end = int(split_line[3])
+				period_duration = period_end - period_start
+				frame.add_event_value(cpu, duration_event_idx+len(counters), period_duration)
 			
 			elif split_line[0] == "counter_description":
 
@@ -669,6 +685,15 @@ def parse_trace(filename,
 							
 							value = float(split_line[counter_value_offset + event_idx]) / float(duration_counter_value)
 							work.add_event_value(cpu, rate_event_idx, value)
+				
+				# Add an exclusive event that is the duration
+				duration_event_idx = len(derived_counters)
+				if "WALLCLOCK" in derived_counters.values():
+					duration_event_idx = list(derived_counters.values()).index("WALLCLOCK")
+				else:
+					derived_counters[duration_event_idx] = "WALLCLOCK"
+
+				work.add_event_value(cpu, duration_event_idx+len(counters), cpu_interval)
 
 			else:
 				logging.error("Cannot parse line: %s", line);
