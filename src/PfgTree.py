@@ -95,12 +95,12 @@ class PFGTreeNodeElement:
 		self.wallclock_duration = wallclock_duration # this is truly wallclock duration, must be careful to choose the correct one when merging
 		self.parallelism_intervals = parallelism_intervals # total CPU time spent in each parallelism state, this should sum to CPU time
 		self.per_event_values = per_event_values
-		logging.info("Created Element for %s this: %s", name, per_event_values)
 
 		if cpu_time is None:
 			self.cpu_time = wallclock_duration
 		else:
 			self.cpu_time = cpu_time
+
 
 """
 	This is a specific execution interval
@@ -121,7 +121,6 @@ class PFGTreeNodeExecutionInterval:
 		self.duration = duration
 		self.parallelism_intervals = parallelism_intervals # these are how long this CPU spent in each parallelism state, should sum to duration
 
-		logging.info("Created Interval for %s this: %s", name, per_event_values)
 		self.per_event_values = per_event_values
 
 class PFGTreeNode:
@@ -162,6 +161,11 @@ class PFGTreeNode:
 		self.differential_interval = None # i.e. wallclock
 		self.differential_parallelism = None
 		self.differential_cpu_time = None
+		self.antiisomorphic = None
+
+		self.antiisomorphic_parallelism_intervals = None # A hacky accumulation of child parallelism intervals, to allow for calculation of differential parallelisms of antiisomorphic nodes
+
+		self.corresponding_node = None
 
 		# for plotting
 		self.start_x = None
@@ -190,26 +194,26 @@ class PFGTreeNode:
 				for parallelism, interval in execution_interval.parallelism_intervals.items():
 					parallelism_intervals_by_group[execution_interval.name][parallelism] += interval 
 			
+			# We always add the duration of all intervals (across CPUs) to the total CPU time
+			cpu_time_by_group[execution_interval.name] += execution_interval.duration
+			
 			# could put more information here about the collapsed parallel information (currently only retaining the profiling information for the node with the longest wallclock from the group)
 			if execution_interval.cpu not in self.cpus:
 				self.cpus.append(execution_interval.cpu)
 
-			cpu_time_by_group[execution_interval.name] += execution_interval.duration
-
 		for group, duration in cpu_time_by_group.items():
 			if group not in wallclock_durations_by_group:
 				# this means it is an appended node part from a different CPU
+				# TODO is this still relevant?
 				wallclock_durations_by_group[group] += duration
 
 		total_wallclock_duration = 0
 		for group, duration in wallclock_durations_by_group.items():
-			cpu_time = cpu_time_by_group[group]
+			cpu_time_for_group = cpu_time_by_group[group]
 			parallelism_intervals_for_group = parallelism_intervals_by_group[group]
 			per_event_values_for_group = per_event_values_by_group[group]
 
-			logging.info("Per event values for group: %s", per_event_values_for_group)
-
-			part = PFGTreeNodeElement(group, duration, parallelism_intervals_for_group, per_event_values_for_group, cpu_time)
+			part = PFGTreeNodeElement(group, duration, parallelism_intervals_for_group, per_event_values_for_group, cpu_time_for_group)
 
 			total_wallclock_duration += duration
 			self.node_partitions.append(part)
@@ -240,6 +244,7 @@ class PFGTree:
 		self.stack_frames_aggregated = aggregate_stack_frames_by_default
 
 		self.colour_mode = ColourMode.BY_CPU
+		self.inclusive = True
 
 		# As part of the constructor, build the tree
 		self.gen_tree_process_entities_into_child_nodes(None, root_entities, self.root_nodes, 0, aggregate_stack_frames_by_default)
@@ -847,109 +852,627 @@ class PFGTree:
 
 		return mapped_nodes
 
-def generate_exclusive_parallelism_intervals(nodes):
+	def generate_exclusive_cpu_times(self, nodes):
 
-	for node in nodes:
-		if node.parent_node is not None:
-			for parallelism, interval in node.node_partitions[0].parallelism_intervals.items():
-				# remove the interval from the parent
-				node.parent_node.node_partitions[0].parallelism_intervals[parallelism] -= interval
+		self.inclusive = False
+		for node in nodes:
 
-		# descend to this node's children and do the same
-		generate_exclusive_parallelism_intervals(node.child_nodes)
+			if node.parent_node is not None:
 
-# This function needs to do depth first search, and accumulate upwards!
-def generate_inclusive_event_counts(nodes, counters):
+				for interval_idx, interval in enumerate(node.execution_intervals):
+					# Find the corresponding interval of the parent
+					if interval.cpu in node.parent_node.cpus:
 
-	accumulated_counts = defaultdict(int)
+						# Remove it from the summed cpu_time
 
-	for node in nodes:
-		node_event_counts = node.node_partitions[0].per_event_values
+						logging.info("Removing an interval of duration %s of %s on cpu %d from the node %s with duration %s",
+							sizeof_fmt(interval.duration),
+							node.node_partitions[0].name,
+							interval.cpu,
+							node.parent_node.node_partitions[0].name,
+							sizeof_fmt(node.parent_node.node_partitions[0].cpu_time))
 
-		accumulated_child_counts = generate_inclusive_event_counts(node.child_nodes, counters)
+						node.parent_node.node_partitions[0].cpu_time -= interval.duration
+
+						# Also remove from the parent's interval to keep consistent
+						parent_interval_idx = node.parent_node.cpus.index(interval.cpu)
+						node.parent_node.execution_intervals[parent_interval_idx].duration -= interval.duration
+			
+			# descend to this node's children and do the same
+			self.generate_exclusive_cpu_times(node.child_nodes)
+
+	def generate_exclusive_parallelism_intervals(self, nodes):
+
+		self.inclusive = False
+
+		for node in nodes:
+			if node.parent_node is not None:
+				for parallelism, interval in node.node_partitions[0].parallelism_intervals.items():
+					# remove the interval from the parent
+					node.parent_node.node_partitions[0].parallelism_intervals[parallelism] -= interval
+
+			# descend to this node's children and do the same
+			self.generate_exclusive_parallelism_intervals(node.child_nodes)
+
+	# This function needs to do depth first search, and accumulate upwards!
+	# Parallelism intervals are inclusive by default, and CPU times are inclusive after merging across CPUs
+	def generate_inclusive_event_counts(self, nodes, counters):
+
+		self.inclusive = True
+
+		accumulated_counts = defaultdict(int)
+		accumulated_cpu_time = 0
+
+		for node in nodes:
+			node_event_counts = node.node_partitions[0].per_event_values
+
+			accumulated_child_counts, accumulated_child_cpu_time = self.generate_inclusive_event_counts(node.child_nodes, counters)
+			
+			# add accumulated child counts to this node
+			for event, value in accumulated_child_counts.items():
+				node_event_counts[event] += value
+
+			# process the rates, which should be be an average not a sum
+			rate_events = [event for event in list(counters.values()) if "_RATE" in event]
+			for rate_event in rate_events:
+				event_idx = list(counters.values()).index(rate_event.replace("_RATE",""))
+				rate_event_idx = list(counters.values()).index(rate_event)
+				duration_event_idx = list(counters.values()).index("PAPI_TOT_CYC")
+
+				accumulated_event_count = node_event_counts[event_idx]
+				duration = node_event_counts[duration_event_idx]
+				node_event_counts[rate_event_idx] = float(accumulated_event_count) / duration
+
+			# add to the accumulated counts for the siblings
+			for event, value in node_event_counts.items():
+				accumulated_counts[event] += value
+				
+			for interval_idx, interval in enumerate(node.execution_intervals):
+				# Find the corresponding interval of the parent
+				if node.parent_node is not None and interval.cpu in node.parent_node.cpus:
+					# Also add it to the parent's corresponding interval to keep consistent
+					parent_interval_idx = node.parent_node.cpus.index(interval.cpu)
+					node.parent_node.execution_intervals[parent_interval_idx].duration += interval.duration
+
+			# add child cpu time to the accumulated cpu time for siblings
+			node.node_partitions[0].cpu_time += accumulated_child_cpu_time
+			accumulated_cpu_time += node.node_partitions[0].cpu_time
+
+		return accumulated_counts, accumulated_cpu_time
+
+	def match_corresponding_nodes(self, reference_nodes, target_nodes, reference_depth, target_depth):
+
+		matched_nodes = [] # each element is an array of 2 nodes
+		reference_antiisomorphic_nodes = []
+		target_antiisomorphic_nodes = []
+
+		# For each reference node:
+		for reference_idx in range(len(reference_nodes)):
+
+			reference_node = reference_nodes[reference_idx]
+			if reference_node.corresponding_node is not None:
+				continue
+
+			# find a target for this node
+			found_pair = False
+			for target_node in target_nodes:
+
+				# If same name, and target_node isn't already associated, then we have a match
+				if (reference_node.node_partitions[0].name == target_node.node_partitions[0].name and target_node.corresponding_node is None):
+
+					reference_node.corresponding_node = target_node
+					target_node.corresponding_node = reference_node
+					matched_nodes.append([reference_node, target_node])
+					found_pair = True
+					break
+
+			if found_pair:
+				# descend into the matched nodes respective children, and try to match them
+				child_matches, child_ref_anti_nodes, child_tar_anti_nodes  = self.match_corresponding_nodes(reference_node.child_nodes, reference_node.corresponding_node.child_nodes, reference_depth+1, target_depth+1)
+				matched_nodes.extend(child_matches)
+				reference_antiisomorphic_nodes.extend(child_ref_anti_nodes)
+				target_antiisomorphic_nodes.extend(child_tar_anti_nodes)
+				continue
+
+			# Check if both reference nodes and target nodes contain parallel loop
+			reference_nodes_contain_parallel_loop = any([True if node.node_partitions[0].name == "omp_parallel_loop" else False for node in reference_nodes])
+			target_nodes_contain_parallel_loop = any([True if node.node_partitions[0].name == "omp_parallel_loop" else False for node in target_nodes])
+			if reference_nodes_contain_parallel_loop and target_nodes_contain_parallel_loop:
+				# Failed
+				pass
+			else:
+				# If reference is omp_parallel_loop:
+				if reference_node.node_partitions[0].name == "omp_parallel_loop":
+
+					# Compare target_nodes with reference_node.child_nodes
+					# If I find a match, then add it as a node pair, and set this reference_node to be anti-isomorphic
+					cross_depth_matches, cross_depth_ref_anti_nodes, cross_depth_tar_anti_nodes = self.match_corresponding_nodes(reference_node.child_nodes, target_nodes, reference_depth+1, target_depth)
+
+					# Can't get here if no match found
+					reference_node.antiisomorphic = True
+					if reference_node not in reference_antiisomorphic_nodes:
+						reference_antiisomorphic_nodes.append(reference_node)
+
+					matched_nodes.extend(cross_depth_matches)
+					reference_antiisomorphic_nodes.extend(cross_depth_ref_anti_nodes)
+					target_antiisomorphic_nodes.extend(cross_depth_tar_anti_nodes)
+					found_pair = True
+
+				elif target_nodes_contain_parallel_loop:
+					# Compare reference_node with the child nodes of the target_node that is an omp_parallel_loop
+					target_loop_idx = [idx for idx, node in enumerate(target_nodes) if node.node_partitions[0].name == "omp_parallel_loop"][0]
+					target_loop_node = target_nodes[target_loop_idx]
+
+					# Compare this node with target_loop_node's children
+					# If I find a match, then add it as a node pair, and set that target_node to be anti-isomorphic
+					cross_depth_matches, cross_depth_ref_anti_nodes, cross_depth_tar_anti_nodes = self.match_corresponding_nodes([reference_node], target_loop_node.child_nodes, reference_depth, target_depth+1)
+					
+					# Can't get here if no match found
+					target_loop_node.antiisomorphic = True
+					if target_loop_node not in target_antiisomorphic_nodes:
+						target_antiisomorphic_nodes.append(target_loop_node)
+
+					matched_nodes.extend(cross_depth_matches)
+					reference_antiisomorphic_nodes.extend(cross_depth_ref_anti_nodes)
+					target_antiisomorphic_nodes.extend(cross_depth_tar_anti_nodes)
+					found_pair = True
+
+				else:
+					# Failed
+					pass
+
+			if found_pair == False:
+				# Failed to find a match
+				logging.error("Failed to find a match for reference node %s at depth %d from targets at depth %d: %s",
+					reference_node.node_partitions[0].name,
+					reference_depth,
+					target_depth,
+					",".join([node.node_partitions[0].name for node in target_nodes]))
+				exit(1)
+				
+		return matched_nodes, reference_antiisomorphic_nodes, target_antiisomorphic_nodes
+
+	def calculate_nodes_differential(self, reference_root_nodes, target_root_nodes, counters):
+
+		matched_nodes, reference_antiisomorphic_nodes, target_antiisomorphic_nodes = self.match_corresponding_nodes(reference_root_nodes, target_root_nodes, 0, 0)
+
+		# Antiisomorphic target nodes: this is an extra omp_parallel_loop in the target.
+		# If there is a loop, then it will be fully contained in the parent, so the parent's wallclock will account for the wallclock differential.
+			# The target node might have event counts that are exclusive to it, however, unless the tree has been trasnformed for inclusive counts
+			# I need to add those event counts to its parent, so that the differential works out
+
+		if self.inclusive == False:
+
+			# Each construct has it's own counts. But we won't be using the antiisomorphic nodes for differential calculations.
+			# Therfore I need to give their exclusive counts to their parents to make the differential correct
+			for node_set in [target_antiisomorphic_nodes, reference_antiisomorphic_nodes]:
+				for anti_node in node_set:
+
+					# TODO
+					# What if I have multiple levels of anti-isomorphism?
+					# I need to recurse to get the first set of non-antiisomorphic values!
+
+					event_counts = anti_node.node_partitions[0].per_event_values
+					parent_event_counts = anti_node.parent_node.node_partitions[0].per_event_values # guaranteed to have a parent (main cannot be omp_parallel_loop)
+					
+					# add accumulated child counts to this node
+					for event, value in event_counts.items():
+						parent_event_counts[event] += value
+
+					# process the rates, which should be be an average not a sum
+					rate_events = [event for event in list(counters.values()) if "_RATE" in event]
+					for rate_event in rate_events:
+						event_idx = list(counters.values()).index(rate_event.replace("_RATE",""))
+						rate_event_idx = list(counters.values()).index(rate_event)
+						duration_event_idx = list(counters.values()).index("PAPI_TOT_CYC")
+
+						parent_event_count = parent_event_counts[event_idx] # i.e. the one we have accumulated
+						duration = parent_event_counts[duration_event_idx]
+						parent_event_counts[rate_event_idx] = float(parent_event_count) / duration
+
+					# add the cpu time to the accumulated cpu time for siblings
+					anti_node.parent_node.node_partitions[0].cpu_time += anti_node.node_partitions[0].cpu_time 
+
+					# add the parallelism intervals of the child to the parent
+					for parallelism, interval in anti_node.node_partitions[0].parallelism_intervals.items():
+						anti_node.parent_node.node_partitions[0].parallelism_intervals[parallelism] += interval
+
+		# Unmatched reference nodes: there is an extra omp_parallel_loop in the reference, and this will be displayed, meaning it needs to have differential values (e.g. wallclock interval)
+		# The reference will always be shown, so what wallclock should it have?
+		# It should have an differential interval that is the sum of its children
+		# If counts are inclusive, it simply has exactly the same as the sum of its children
+		# If counts are exclusive, all differential values are 0
+		# This must be done *after* the differential intervals are calculated
+
+		for ref_node, tar_node in matched_nodes:
+
+			ref_node_wallclock = max(ref_node.wallclock_durations)
+			tar_node_wallclock = max(tar_node.wallclock_durations)
+
+			ref_node.differential_interval = tar_node_wallclock - ref_node_wallclock
+
+			per_event_value_differential = {}
+			for event_idx, tar_value in tar_node.node_partitions[0].per_event_values.items():
+				ref_value = ref_node.node_partitions[0].per_event_values[event_idx]
+				per_event_value_differential[event_idx] = tar_value - ref_value
+				logging.debug("Target node %s at depth %s had %s more %s than the reference", ref_node.node_partitions[0].name, ref_node.original_depth, tar_value-ref_value, counters[event_idx])
+
+			ref_node.node_partitions[0].per_event_values = per_event_value_differential
+
+			# add differential value for parallelism
+			num = 0
+			denom = 0
+			for parallelism, interval in tar_node.node_partitions[0].parallelism_intervals.items():
+				num += parallelism*interval
+				denom += interval
+			target_weighted_arithmetic_mean_parallelism = float(num) / denom
+			
+			num = 0
+			denom = 0
+			for parallelism, interval in ref_node.node_partitions[0].parallelism_intervals.items():
+				num += parallelism*interval
+				denom += interval
+			reference_weighted_arithmetic_mean_parallelism = float(num) / denom
+
+			ref_node.differential_parallelism = target_weighted_arithmetic_mean_parallelism - reference_weighted_arithmetic_mean_parallelism
+
+			# add differential value for total cpu time
+			ref_node.differential_cpu_time = tar_node.node_partitions[0].cpu_time - ref_node.node_partitions[0].cpu_time
+
+			if ref_node.differential_interval < 0:
+				logging.trace("Target node %s at depth %s was faster than the reference by %s", ref_node.node_partitions[0].name, ref_node.original_depth, abs(ref_node.differential_interval))
+			else:
+				logging.trace("Target node %s at depth %s was slower than the reference by %s", ref_node.node_partitions[0].name, ref_node.original_depth, ref_node.differential_interval)
+
+			# The antiisomorphic parents need to have the different interval taken from their non-antiisomorphic children
+			# And if the tree is inclusive, also the event counts and so on
+			antiisomorphic_parents = []
+
+			isomorphic_parent_node = None
+			if ref_node.parent_node is not None and ref_node.parent_node.antiisomorphic:
+				# search for first non-antiisomorphic parent
+				parent_node = ref_node.parent_node
+				while isomorphic_parent_node is None:
+					antiisomorphic_parents.append(parent_node)
+					if parent_node.parent_node is not None:
+						if parent_node.parent_node.antiisomorphic is None or parent_node.parent_node.antiisomorphic == False:
+							isomorphic_parent_node = parent_node.parent_node
+						else:
+							parent_node = parent_node.parent_node
+					else:
+						logging.error("A node (%s) couldn't find a parent node that was isomorphic!", ref_node.node_partitions[0].name)
+						raise ValueError()
+
+			# I must append my values to all antiisomorphic parents, so that they have the sum differential of their children
+			for parent_node in antiisomorphic_parents:
+
+				if parent_node.differential_interval is None: 
+					parent_node.differential_interval = ref_node.differential_interval
+
+					if self.inclusive:
+						parent_node.differential_cpu_time = ref_node.differential_cpu_time
+						parent_node.node_partitions[0].per_event_values = ref_node.node_partitions[0].per_event_values
+						parent_node.antiisomorphic_parallelism_intervals = ref_node.node_partitions[0].parallelism_intervals
+
+				else:
+					parent_node.differential_interval += ref_node.differential_interval
+
+					if self.inclusive:
+						parent_node.differential_cpu_time += ref_node.differential_cpu_time
+
+						for event_idx, ref_value_differential in ref_node.node_partitions[0].per_event_values.items():
+							ref_value = ref_node.node_partitions[0].per_event_values[event_idx]
+							parent_node.node_partitions[0].per_event_values[event_idx] += ref_value_differential
+
+						# I need a many-to-one computation between the reference node and the set of children, in light of there being no corresponding node
+						for parallelism, interval in ref_node.node_partitions[0].parallelism_intervals.items():
+							parent_node.antiisomorphic_parallelism_intervals[parallelism] += interval
+			
+			# ALTERNATIVELY, I COULD JUST REMOVE THE ANTI_ISOMORPHIC REFERENCE
+			# IN FACT I REALLY SHOULD ONLY SEE THE ANTI_ISOMORPHIC TARGET
+			# TODO now that I do this, can I just remove all the other stuff?
+
+			# TODO I now need to ADD the target antiisomorphic nodes to the reference graph!!
+
+			if isomorphic_parent_node is not None:
+				for parent_node in antiisomorphic_parents:
+					if parent_node in isomorphic_parent_node.child_nodes:
+						isomorphic_parent_node.child_nodes.remove(parent_node)
+
+				isomorphic_parent_node.child_nodes.append(ref_node)
+				
+				# set the parent to be the ismorphic one
+				ref_node.parent_node = isomorphic_parent_node
+				ref_node.ancestor_alignment_node = isomorphic_parent_node
 		
-		# add accumulated child counts to this node
-		for event, value in accumulated_child_counts.items():
-			node_event_counts[event] += value
+		for ref_anti_node in reference_antiisomorphic_nodes:
+			if self.inclusive:
+				# Recompute the averaged event counts for each reference
+				rate_events = [event for event in list(counters.values()) if "_RATE" in event]
+				for rate_event in rate_events:
+					event_idx = list(counters.values()).index(rate_event.replace("_RATE",""))
+					rate_event_idx = list(counters.values()).index(rate_event)
+					duration_event_idx = list(counters.values()).index("PAPI_TOT_CYC")
 
-		# process the rates, which should be be an average not a sum
-		rate_events = [event for event in list(counters.values()) if "_RATE" in event]
-		for rate_event in rate_events:
-			event_idx = list(counters.values()).index(rate_event.replace("_RATE",""))
-			rate_event_idx = list(counters.values()).index(rate_event)
-			duration_event_idx = list(counters.values()).index("PAPI_TOT_CYC")
+					event_count = ref_anti_node.node_partitions[0].per_event_values[event_idx]
+					duration = ref_anti_node.node_partitions[0].per_event_values[duration_event_idx]
+					ref_anti_node.node_partitions[0].per_event_values[rate_event_idx] = float(event_count) / duration
+			
+				# Compute the differential parallelism, after having accumulated all of the child parallelism_intervals
+				num = 0
+				denom = 0
+				for parallelism, interval in ref_anti_node.antiisomorphic_parallelism_intervals.items():
+					num += parallelism*interval
+					denom += interval
+				target_weighted_arithmetic_mean_parallelism = float(num) / denom
+				
+				num = 0
+				denom = 0
+				for parallelism, interval in ref_anti_node.node_partitions[0].parallelism_intervals.items():
+					num += parallelism*interval
+					denom += interval
+				reference_weighted_arithmetic_mean_parallelism = float(num) / denom
 
-			accumulated_event_count = node_event_counts[event_idx]
-			duration = node_event_counts[duration_event_idx]
-			node_event_counts[rate_event_idx] = float(accumulated_event_count) / duration
+				ref_anti_node.differential_parallelism = target_weighted_arithmetic_mean_parallelism - reference_weighted_arithmetic_mean_parallelism
 
-		# add to the accumulated counts for the siblings
-		for event, value in node_event_counts.items():
-			accumulated_counts[event] += value
+				# The differential interval will have already been computed during the processing of the matched nodes				
 
-	return accumulated_counts
+			else:
+				ref_anti_node.differential_parallelism = 0.0
+				ref_anti_node.differential_cpu_time = 0.0
 
-def calculate_nodes_differential(reference_nodes, target_nodes, counters):
+				for event_idx in range(len(ref_anti_node.node_partitions[0].per_event_values)):
+					ref_anti_node.node_partitions[0].per_event_values[event_idx] = 0.0 # no differential, because it doesn't exist in the other one
+				
+				# The differential interval will have already been computed during the processing of the matched nodes				
 
-	# TODO should have some mapping algorithm to determine node pairs, then just iterate through the node pairs
-	# For now, assuming isomorphism, so we can just step through both as a depth first search and we should land on the 'same' node at each step
+	def calculate_nodes_differential_version2(self, reference_root_nodes, target_root_nodes, counters):
 
-	# For each ref_node in self
-		# Find the same tar_node in target_tree
-		# Adjust ref_node
+		matched_nodes, reference_antiisomorphic_nodes, target_antiisomorphic_nodes = self.match_corresponding_nodes(reference_root_nodes, target_root_nodes, 0, 0)
+
+		if self.inclusive == False:
+			# Each construct has it's own counts. But we won't be using the antiisomorphic nodes for differential calculations.
+			# Therfore I need to give their exclusive counts to their parents to make the differential correct
+			for node_set in [target_antiisomorphic_nodes, reference_antiisomorphic_nodes]:
+				for anti_node in node_set:
+					
+					# Find the first non-antiisomorphic parent of this node
+					# In order to give it my exclusive event counts
+
+					event_counts = anti_node.node_partitions[0].per_event_values
+
+					isomorphic_parent_node = None
+					if anti_node.parent_node is not None and anti_node.parent_node.antiisomorphic:
+						# search for first non-antiisomorphic parent
+						parent_node = anti_node.parent_node
+						while isomorphic_parent_node is None:
+							if parent_node.parent_node is not None:
+								if parent_node.parent_node.antiisomorphic is None or parent_node.parent_node.antiisomorphic == False:
+									isomorphic_parent_node = parent_node.parent_node
+								else:
+									parent_node = parent_node.parent_node
+							else:
+								logging.error("A node (%s) couldn't find a parent node that was isomorphic!", anti_node.node_partitions[0].name)
+								raise ValueError()
 	
-	if len(reference_nodes) != len(target_nodes):
-		logging.error("Found %s reference nodes but %s target nodes. Differential comparison is currently assuming isomorphism. Aborting.", len(reference_nodes), len(target_nodes))
-		for ref_idx, ref_node in enumerate(reference_nodes):
-			logging.error("Ref node was %s", ref_node.node_partitions[0].name)
-		for ref_idx, tar_node in enumerate(target_nodes):
-			logging.error("Ref node was %s", ref_node.node_partitions[0].name)
+					# If I have already removed it, don't worry about the anti_node
+					if isomorphic_parent_node is None:
+						continue
 
-		raise ValueError()
+					parent_event_counts = isomorphic_parent_node.node_partitions[0].per_event_values
+					
+					# add accumulated child counts to this node
+					for event, value in event_counts.items():
+						parent_event_counts[event] += value
 
-	for node_comparison_idx in range(len(reference_nodes)):
+					# process the rates, which should be be an average not a sum
+					rate_events = [event for event in list(counters.values()) if "_RATE" in event]
+					for rate_event in rate_events:
+						event_idx = list(counters.values()).index(rate_event.replace("_RATE",""))
+						rate_event_idx = list(counters.values()).index(rate_event)
+						duration_event_idx = list(counters.values()).index("PAPI_TOT_CYC")
 
-		ref_node = reference_nodes[node_comparison_idx]
-		tar_node = target_nodes[node_comparison_idx]
+						parent_event_count = parent_event_counts[event_idx] # i.e. the one we have accumulated
+						duration = parent_event_counts[duration_event_idx]
+						parent_event_counts[rate_event_idx] = float(parent_event_count) / duration
 
-		ref_node_wallclock = max(ref_node.wallclock_durations)
-		tar_node_wallclock = max(tar_node.wallclock_durations)
+					isomorphic_parent_node.node_partitions[0].per_event_values = parent_event_counts
+					
+					"""
+					logging.info("Adding CPU time %s of %s to the node %s with duration %s",
+						sizeof_fmt(anti_node.node_partitions[0].cpu_time),
+						anti_node.node_partitions[0].name,
+						isomorphic_parent_node.node_partitions[0].name,
+						sizeof_fmt(isomorphic_parent_node.node_partitions[0].cpu_time))
+					exit(0)
+					"""
 
-		ref_node.differential_interval = tar_node_wallclock - ref_node_wallclock
+					# add the cpu time to the accumulated cpu time for siblings
+					isomorphic_parent_node.node_partitions[0].cpu_time += anti_node.node_partitions[0].cpu_time 
+					
+					# add the parallelism intervals of the child to the parent
+					for parallelism, interval in anti_node.node_partitions[0].parallelism_intervals.items():
+						isomorphic_parent_node.node_partitions[0].parallelism_intervals[parallelism] += interval
 
-		per_event_value_differential = {}
-		for event_idx, tar_value in tar_node.node_partitions[0].per_event_values.items():
-			ref_value = ref_node.node_partitions[0].per_event_values[event_idx]
-			per_event_value_differential[event_idx] = tar_value - ref_value
-			logging.debug("Target node %s at depth %s had %s more %s than the reference", ref_node.node_partitions[0].name, ref_node.original_depth, tar_value-ref_value, counters[event_idx])
+		# My goal is to remove all reference antiisomorphic nodes
+		# Do this by connecting the parent and children of all the reference nodes, obviously
+		for ref_anti_node in reference_antiisomorphic_nodes:
+			for child_node in ref_anti_node.child_nodes:
+				child_node.parent_node = ref_anti_node.parent_node
+				child_node.ancestor_alignment_node = ref_anti_node.ancestor_alignment_node
+			ref_anti_node.parent_node.child_nodes.remove(ref_anti_node)
+			ref_anti_node.parent_node.child_nodes.extend(ref_anti_node.child_nodes)
+			ref_anti_node.child_nodes.clear()
 
-		ref_node.node_partitions[0].per_event_values = per_event_value_differential
+		# Now, add all target antiisomorphic nodes to the reference
+		for tar_anti_node in target_antiisomorphic_nodes:
+			logging.debug("%s exists in the target tracefile but does not have a counterpart in the reference!", tar_anti_node.node_partitions[0].name)
 
-		# add differential value for parallelism
-		num = 0
-		denom = 0
-		for parallelism, interval in tar_node.node_partitions[0].parallelism_intervals.items():
-			num += parallelism*interval
-			denom += interval
-		target_weighted_arithmetic_mean_parallelism = float(num) / denom
-		
-		num = 0
-		denom = 0
-		for parallelism, interval in ref_node.node_partitions[0].parallelism_intervals.items():
-			num += parallelism*interval
-			denom += interval
-		reference_weighted_arithmetic_mean_parallelism = float(num) / denom
+			# remove the target node from its parent
+			tar_anti_node.parent_node.child_nodes.remove(tar_anti_node)
 
-		ref_node.differential_parallelism = target_weighted_arithmetic_mean_parallelism - reference_weighted_arithmetic_mean_parallelism
+			# set the target node's parent to be the reference version of its parent
+			tar_anti_node.parent_node = tar_anti_node.parent_node.corresponding_node
+			tar_anti_node.ancestor_alignment_node = tar_anti_node.parent_node
+			
+			# find the reference matches for the children of the target node
+			child_nodes_to_move = [child_node for child_node in tar_anti_node.parent_node.child_nodes if child_node.corresponding_node in tar_anti_node.child_nodes]
 
-		# add differential value for total cpu time
-		ref_node.differential_cpu_time = tar_node.node_partitions[0].cpu_time - ref_node.node_partitions[0].cpu_time
+			# remove the matching references from the reference parent
+			for child_node in child_nodes_to_move:
+				child_node.parent_node.child_nodes.remove(child_node)
+				child_node.parent_node = tar_anti_node
+				child_node.ancestor_alignment_node = tar_anti_node
 
-		if ref_node.differential_interval < 0:
-			logging.trace("Target node %s at depth %s was faster than the reference by %s", ref_node.node_partitions[0].name, ref_node.original_depth, abs(ref_node.differential_interval))
-		else:
-			logging.trace("Target node %s at depth %s was slower than the reference by %s", ref_node.node_partitions[0].name, ref_node.original_depth, ref_node.differential_interval)
+			# remove the children of the target node
+			tar_anti_node.child_nodes.clear()
+			
+			# add the matching reference children to the target node
+			tar_anti_node.child_nodes = child_nodes_to_move
+			tar_anti_node.node_partitions[0].wallclock_duration = sum([child_node.node_partitions[0].wallclock_duration for child_node in tar_anti_node.child_nodes])
 
-		if len(ref_node.child_nodes) > 0:
-			calculate_nodes_differential(ref_node.child_nodes, tar_node.child_nodes, counters)
+			# finally, add the target node to the reference parent
+			tar_anti_node.parent_node.child_nodes.append(tar_anti_node)
+
+		# I now have the correct tree to display
+
+		# Now, I need to compute the differentials!
+		for ref_node, tar_node in matched_nodes:
+
+			ref_node_wallclock = max(ref_node.wallclock_durations)
+			tar_node_wallclock = max(tar_node.wallclock_durations)
+
+			ref_node.differential_interval = tar_node_wallclock - ref_node_wallclock
+
+			per_event_value_differential = {}
+			for event_idx, tar_value in tar_node.node_partitions[0].per_event_values.items():
+				ref_value = ref_node.node_partitions[0].per_event_values[event_idx]
+				per_event_value_differential[event_idx] = tar_value - ref_value
+				logging.debug("Target node %s at depth %s had %s more %s than the reference", ref_node.node_partitions[0].name, ref_node.original_depth, tar_value-ref_value, counters[event_idx])
+
+			ref_node.node_partitions[0].per_event_values = per_event_value_differential
+
+			# add differential value for parallelism
+			num = 0
+			denom = 0
+			for parallelism, interval in tar_node.node_partitions[0].parallelism_intervals.items():
+				num += parallelism*interval
+				denom += interval
+			target_weighted_arithmetic_mean_parallelism = float(num) / denom
+			
+			num = 0
+			denom = 0
+			for parallelism, interval in ref_node.node_partitions[0].parallelism_intervals.items():
+				num += parallelism*interval
+				denom += interval
+			reference_weighted_arithmetic_mean_parallelism = float(num) / denom
+
+			ref_node.differential_parallelism = target_weighted_arithmetic_mean_parallelism - reference_weighted_arithmetic_mean_parallelism
+
+			# add differential value for total cpu time
+			ref_node.differential_cpu_time = tar_node.node_partitions[0].cpu_time - ref_node.node_partitions[0].cpu_time
+			
+			if ref_node.differential_interval < 0:
+				logging.trace("Target node %s at depth %s was faster than the reference by %s", ref_node.node_partitions[0].name, ref_node.original_depth, abs(ref_node.differential_interval))
+			else:
+				logging.trace("Target node %s at depth %s was slower than the reference by %s", ref_node.node_partitions[0].name, ref_node.original_depth, ref_node.differential_interval)
+
+			# Now, I need to compute the differential counts for any antiisomorphic reference nodes
+
+			# The antiisomorphic parents need to have the different interval taken from their non-antiisomorphic children
+			# And if the tree is inclusive, also the event counts and so on
+			antiisomorphic_parents = []
+
+			isomorphic_parent_node = None
+			if ref_node.parent_node is not None and ref_node.parent_node.antiisomorphic:
+				# search for first non-antiisomorphic parent
+				parent_node = ref_node.parent_node
+				while isomorphic_parent_node is None:
+					antiisomorphic_parents.append(parent_node)
+					if parent_node.parent_node is not None:
+						if parent_node.parent_node.antiisomorphic is None or parent_node.parent_node.antiisomorphic == False:
+							isomorphic_parent_node = parent_node.parent_node
+						else:
+							parent_node = parent_node.parent_node
+					else:
+						logging.error("A node (%s) couldn't find a parent node that was isomorphic!", ref_node.node_partitions[0].name)
+						raise ValueError()
+
+			for parent_node in antiisomorphic_parents:
+
+				if parent_node.differential_interval is None: 
+					parent_node.differential_interval = ref_node.differential_interval
+
+					if self.inclusive:
+						parent_node.differential_cpu_time = ref_node.differential_cpu_time
+						parent_node.node_partitions[0].per_event_values = ref_node.node_partitions[0].per_event_values
+						parent_node.antiisomorphic_parallelism_intervals = ref_node.node_partitions[0].parallelism_intervals
+					else:
+						parent_node.differential_cpu_time = 0.0
+						for event_idx, ref_value_differential in ref_node.node_partitions[0].per_event_values.items():
+							parent_node.node_partitions[0].per_event_values[event_idx] = 0.0
+						parent_node.antiisomorphic_parallelism_intervals = {}
+						for parallelism, interval in ref_node.node_partitions[0].parallelism_intervals.items():
+							parent_node.antiisomorphic_parallelism_intervals[parallelism] = 0.0
+
+				else:
+					parent_node.differential_interval += ref_node.differential_interval
+
+					if self.inclusive:
+						parent_node.differential_cpu_time += ref_node.differential_cpu_time
+
+						logging.info("Differential_cpu_time on parent_node %s was %s after adding the ref_node's %s differential_cpu_time %s",
+							parent_node.node_partitions[0].name,
+							sizeof_fmt(parent_node.differential_cpu_time),
+							ref_node.node_partitions[0].name,
+							sizeof_fmt(ref_node.differential_cpu_time))
+
+						for event_idx, ref_value_differential in ref_node.node_partitions[0].per_event_values.items():
+							ref_value = ref_node.node_partitions[0].per_event_values[event_idx]
+							parent_node.node_partitions[0].per_event_values[event_idx] += ref_value_differential
+
+						# I need a many-to-one computation between the reference node and the set of children, in light of there being no corresponding node
+						for parallelism, interval in ref_node.node_partitions[0].parallelism_intervals.items():
+							parent_node.antiisomorphic_parallelism_intervals[parallelism] += interval
+
+		for tar_anti_node in target_antiisomorphic_nodes:
+			if self.inclusive:
+				# Recompute the averaged event counts for each reference
+				rate_events = [event for event in list(counters.values()) if "_RATE" in event]
+				for rate_event in rate_events:
+					event_idx = list(counters.values()).index(rate_event.replace("_RATE",""))
+					rate_event_idx = list(counters.values()).index(rate_event)
+					duration_event_idx = list(counters.values()).index("PAPI_TOT_CYC")
+
+					event_count = tar_anti_node.node_partitions[0].per_event_values[event_idx]
+					duration = tar_anti_node.node_partitions[0].per_event_values[duration_event_idx]
+					tar_anti_node.node_partitions[0].per_event_values[rate_event_idx] = float(event_count) / duration
+			
+				# Compute the differential parallelism, after having accumulated all of the child parallelism_intervals
+				num = 0
+				denom = 0
+				for parallelism, interval in tar_anti_node.antiisomorphic_parallelism_intervals.items():
+					num += parallelism*interval
+					denom += interval
+				reference_weighted_arithmetic_mean_parallelism = float(num) / denom
+				
+				num = 0
+				denom = 0
+				for parallelism, interval in tar_anti_node.node_partitions[0].parallelism_intervals.items():
+					num += parallelism*interval
+					denom += interval
+				target_weighted_arithmetic_mean_parallelism = float(num) / denom
+
+				tar_anti_node.differential_parallelism = target_weighted_arithmetic_mean_parallelism - reference_weighted_arithmetic_mean_parallelism
+
+				# The differential interval will have already been computed during the processing of the matched nodes				
+
+			else:
+				tar_anti_node.differential_parallelism = 0.0
+				tar_anti_node.differential_cpu_time = 0.0
+
+				for event_idx in range(len(tar_anti_node.node_partitions[0].per_event_values)):
+					tar_anti_node.node_partitions[0].per_event_values[event_idx] = 0.0 # no differential, because it doesn't exist in the other one
+				
+				# The differential interval will have already been computed during the processing of the matched nodes				
 

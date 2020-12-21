@@ -468,6 +468,7 @@ def parse_trace(filename,
 							value = float(split_line[counter_value_offset + event_idx]) / float(duration_counter_value)
 							frame.add_event_value(cpu, rate_event_idx, value)
 
+				"""
 				# Add an exclusive event that is the duration
 				duration_event_idx = len(derived_counters)
 				if "WALLCLOCK" in derived_counters.values():
@@ -479,6 +480,7 @@ def parse_trace(filename,
 				period_end = int(split_line[3])
 				period_duration = period_end - period_start
 				frame.add_event_value(cpu, duration_event_idx+len(counters), period_duration)
+				"""
 			
 			elif split_line[0] == "counter_description":
 
@@ -686,6 +688,7 @@ def parse_trace(filename,
 							value = float(split_line[counter_value_offset + event_idx]) / float(duration_counter_value)
 							work.add_event_value(cpu, rate_event_idx, value)
 				
+				"""
 				# Add an exclusive event that is the duration
 				duration_event_idx = len(derived_counters)
 				if "WALLCLOCK" in derived_counters.values():
@@ -694,6 +697,7 @@ def parse_trace(filename,
 					derived_counters[duration_event_idx] = "WALLCLOCK"
 
 				work.add_event_value(cpu, duration_event_idx+len(counters), cpu_interval)
+				"""
 
 			else:
 				logging.error("Cannot parse line: %s", line);

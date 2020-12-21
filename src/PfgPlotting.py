@@ -334,7 +334,8 @@ def plot_pfg_node(
 		node_colour_mapping,
 		normalised_colour_transform_per_event,
 		colour_mode,
-		counters
+		counters,
+		tree_is_inclusive
 		):
 
 	total_wallclock_duration = max(node.wallclock_durations)
@@ -379,6 +380,7 @@ def plot_pfg_node(
 	total_realised_wallclock_duration = 0.0
 	original_x0 = x0
 	extended_rectangles = []
+	overbound_rectangles = []
 
 	for part_idx, part in enumerate(node.node_partitions):
 
@@ -527,7 +529,6 @@ def plot_pfg_node(
 					logging.info(extended_facecolour_option)
 					# Making white
 					extended_facecolour_option = (1.0,1.0,1.0,EXTENSIONS_ALPHA)
-					logging.info(extended_facecolour_option)
 					extended_colour_options.append(extended_facecolour_option)
 				
 				extended_edgecolour = list(edgecolour)
@@ -563,7 +564,8 @@ def plot_pfg_node(
 						extended_edgecolour,
 						extended_colour_options[-1],
 						part.name,
-						extended_colour_options
+						extended_colour_options,
+						node
 					]
 					extended_rectangles.append(extended_rect_info)
 
@@ -588,7 +590,8 @@ def plot_pfg_node(
 				rect.colour_options = colour_options
 				ax.add_patch(rect)
 				ax.plotted_bars.append(rect)
-				text = PFGBarText(ax, x0, x0+part_width+extension_part_width, y0, y0+part_height, part.name)
+				#text = PFGBarText(ax, x0, x0+part_width+extension_part_width, y0, y0+part_height, part.name)
+				text = PFGBarText(ax, x0, x0+part_width, y0, y0+part_height, part.name)
 
 				# create an extension rectangle with no fill but hatching
 				logging.info("INNER EXTENSION PART %s from x %s to %s and y %s to %s has facecolor %s", part.name, x0+part_width, x0+part_width+extension_part_width, y0, y0+part_height, colour_options[0])
@@ -599,7 +602,7 @@ def plot_pfg_node(
 					linewidth='0',
 					edgecolor='0',
 					facecolor='none',
-					hatch='/',
+					hatch=2*'/',
 					#facecolor=colours(colour_values[0]) if node.differential_interval < 0 else colours(colour_values[1]),
 					gid=None,
 					zorder=10,
@@ -610,6 +613,17 @@ def plot_pfg_node(
 				#rect_extension.colour_options = colour_options
 				#ax.plotted_bars.append(rect_extension)
 				#text_extension = PFGBarText(ax, x0+part_width, x0+part_width+extension_part_width, y0, y0+part_height, part.name)
+					
+				overbound_rect_info = [
+					extension_part_width,
+					part_height,
+					edgecolour,
+					colour_options[-1],
+					part.name,
+					colour_options,
+					node
+				]
+				overbound_rectangles.append(overbound_rect_info)
 
 				part_width += extension_part_width
 				total_realised_wallclock_duration += node.differential_interval
@@ -640,31 +654,42 @@ def plot_pfg_node(
 	total_node_width = width_to_interval_ratio * total_realised_wallclock_duration
 	
 	info_text = "".join([part.name + ": " + sizeof_fmt(part.wallclock_duration) + "\n" for part in node.node_partitions]) + "\n"
-	if node.differential_interval is not None:
-		symbol = "+" if node.differential_interval >= 0.0 else ""
-		info_text = "".join([part.name + ": " + symbol + sizeof_fmt(node.differential_interval) + "\n" for part in node.node_partitions]) + "\n"
-
-	#info_text += "Wallclock duration: " + sizeof_fmt(total_wallclock_duration) + "\n"
-	symbol = "+" if node.differential_cpu_time is not None and node.differential_cpu_time >= 0.0 else ""
-	if node.differential_interval is not None:
-		info_text += "CPU time: " + symbol + sizeof_fmt(node.differential_cpu_time) + "\n"
+	if node.antiisomorphic:
+		info_text += "\nThis graph node does not exist in the reference execution!\n"
+		info_text += "Differential counts could not be computed.\n"
+		info_text += "Parent=[" + str(parent_name) + ":" + str(parent_identifier) + "]"
 	else:
-		info_text += "CPU time: " + sizeof_fmt(sum([part.cpu_time for part in node.node_partitions])) + "\n"
-
-	symbol = "+" if node.differential_interval is not None and node.differential_interval >= 0.0 else ""
-
-	info_text += "Avg parallelism: " + symbol + str(weighted_arithmetic_mean_parallelism) + "\n\n"
-	info_text += "Parent=[" + str(parent_name) + ":" + str(parent_identifier) + "]\n\n"
-	for event_idx, event_name in counters.items():
-
-		symbol = ""
 		if node.differential_interval is not None:
-			if node.node_partitions[0].per_event_values[event_idx] >= 0.0:
-				symbol = "+"
-		
-		info_text += event_name + ": " + symbol + sizeof_fmt(node.node_partitions[0].per_event_values[event_idx], suffix="")
-		if event_idx+1 < len(counters):
-			info_text += "\n"
+			symbol = "+" if node.differential_interval >= 0.0 else ""
+			info_text = "".join([part.name + ": " + symbol + sizeof_fmt(node.differential_interval) + "\n" for part in node.node_partitions]) + "\n"
+
+		#info_text += "Wallclock duration: " + sizeof_fmt(total_wallclock_duration) + "\n"
+		symbol = "+" if node.differential_cpu_time is not None and node.differential_cpu_time >= 0.0 else ""
+		if node.differential_interval is not None:
+			info_text += "CPU time: " + symbol + sizeof_fmt(node.differential_cpu_time) + "\n"
+		else:
+			info_text += "CPU time: " + sizeof_fmt(sum([part.cpu_time for part in node.node_partitions])) + "\n"
+
+		symbol = "+" if node.differential_interval is not None and node.differential_interval >= 0.0 else ""
+
+		info_text += "Avg parallelism: " + symbol + str(weighted_arithmetic_mean_parallelism) + "\n\n"
+		info_text += "Parent=[" + str(parent_name) + ":" + str(parent_identifier) + "]\n\n"
+
+		if tree_is_inclusive:
+			info_text += "Accumulated single-thread event counts:\n"
+		else:
+			info_text += "Exclusive single-thread event counts:\n"
+
+		for event_idx, event_name in counters.items():
+
+			symbol = ""
+			if node.differential_interval is not None:
+				if node.node_partitions[0].per_event_values[event_idx] >= 0.0:
+					symbol = "+"
+			
+			info_text += event_name + ": " + symbol + sizeof_fmt(node.node_partitions[0].per_event_values[event_idx], suffix="")
+			if event_idx+1 < len(counters):
+				info_text += "\n"
 
 	#wallclock_durations_by_cpu = node.get_per_cpu_wallclock_durations()
 	#for cpu, duration in wallclock_durations_by_cpu.items():
@@ -688,7 +713,80 @@ def plot_pfg_node(
 	else:
 		ax.rectangles[node_identifier] = [original_x0, total_node_width, y0, total_node_height]
 
-	return total_node_width, total_node_height, extended_rectangles
+	return total_node_width, total_node_height, extended_rectangles, overbound_rectangles
+
+def plot_differential(overbound_rectangles_by_y, extension_rectangles_by_y):
+
+	logging.info("overbound: %s", overbound_rectangles_by_y)
+	logging.info("extension: %s", extension_rectangles_by_y)
+
+	fig = plt.figure()
+	fig.set_size_inches(14, 8)
+	ax = fig.add_subplot(111, picker=True)
+
+	keys = list(set(list(overbound_rectangles_by_y.keys()) + list(extension_rectangles_by_y.keys())))
+	keys = sorted(keys)
+	logging.info(keys)
+
+	min_x = None
+	max_x = None
+
+	for y in keys:
+		
+		overbound_rectangles = []
+		if y in overbound_rectangles_by_y:
+			overbound_rectangles = overbound_rectangles_by_y[y]
+		
+		extension_rectangles = []
+		if y in extension_rectangles_by_y:
+			extension_rectangles = extension_rectangles_by_y[y]
+
+		x = 0.0
+		for rect_info in overbound_rectangles:
+			logging.info("Plotting overbound rectangle at x,y:%s,%s with width %s and height %s", x,y,rect_info[0],rect_info[1])
+			overbound_rect_patch = patches.Rectangle(
+				(x,y),
+				rect_info[0],
+				rect_info[1],
+				linewidth=1,
+				edgecolor=rect_info[2],
+				facecolor=rect_info[3],
+				gid=None,
+				zorder=10,
+				picker=True)
+
+			ax.add_patch(overbound_rect_patch)
+			x += rect_info[0]
+
+		if max_x is None or x > max_x:
+			max_x = x
+			
+		x = 0.0
+		for rect_info in extension_rectangles:
+			logging.info("Plotting extension rectangle at x,y:%s,%s with width %s and height %s", x-rect_info[0],y,rect_info[0],rect_info[1])
+			extension_rect_patch = patches.Rectangle(
+				(x-rect_info[0],y),
+				rect_info[0],
+				rect_info[1],
+				linewidth=1,
+				edgecolor=rect_info[2],
+				facecolor=rect_info[3],
+				gid=None,
+				zorder=10,
+				picker=True)
+
+			ax.add_patch(extension_rect_patch)
+			x -= rect_info[0]
+
+		if min_x is None or x < min_x:
+			min_x = x
+	
+	max_x_from_zero = max(abs(min_x), abs(max_x))
+
+	ax.set_xlim([0.0-max_x_from_zero, max_x_from_zero])
+	ax.set_ylim([0,max(keys)])
+
+	plt.show()
 
 def plot_pfg_tree(tree,
 		min_timestamps,
@@ -697,7 +795,9 @@ def plot_pfg_tree(tree,
 		height_option,
 		output_file=None,
 		x_bounds=None,
-		counters={}
+		counters={},
+		tracefile_name_one=None,
+		tracefile_name_two=None
 		):
 
 	if len(tree.root_nodes) == 0:
@@ -803,6 +903,7 @@ def plot_pfg_tree(tree,
 	# The extensions should be plotted starting from the end of the final true rectangle, at each level
 	final_x_position_by_y = {}
 	extension_rectangles_by_y = {}
+	overbound_rectangles_by_y = {}
 	
 	# Processes each set of siblings, using the alignments given by their parent
 	while len(sibling_node_sets) > 0:
@@ -812,6 +913,7 @@ def plot_pfg_tree(tree,
 		for sibling_node_set in sibling_node_sets:
 
 			extended_rectangles = []
+			overbound_rectangles = []
 			siblings_y_value = None
 
 			accumulated_sibling_width = 0.0
@@ -837,7 +939,7 @@ def plot_pfg_tree(tree,
 					parent_name = " and ".join(["("+part.name+")" for part in node.original_parent_node.node_partitions])
 
 				# Plot the node
-				width, height, node_extended_rectangles = plot_pfg_node(ax,
+				width, height, node_extended_rectangles, node_overbound_rectangles = plot_pfg_node(ax,
 					node,
 					x_position,
 					y_position,
@@ -853,13 +955,15 @@ def plot_pfg_tree(tree,
 					node_colour_mapping,
 					normalised_colour_transform_per_event,
 					tree.colour_mode,
-					counters
+					counters,
+					tree.inclusive
 					)
 				logging.trace("Plotting a realised rectangle (%s with parent %s) at y=%s and x=%s to %s",
 					parent_name, node.node_partitions[0].name,
 					y_position, x_position, x_position+width)
 
 				extended_rectangles.extend(node_extended_rectangles)
+				overbound_rectangles.extend(node_overbound_rectangles)
 
 				# write the positions of this node for my children/siblings
 				node.start_x = x_position
@@ -887,6 +991,12 @@ def plot_pfg_tree(tree,
 					extension_rectangles_by_y[siblings_y_value].extend(extended_rectangles)
 				else:
 					extension_rectangles_by_y[siblings_y_value] = extended_rectangles
+			
+			if len(overbound_rectangles) > 0:
+				if siblings_y_value in overbound_rectangles_by_y:
+					overbound_rectangles_by_y[siblings_y_value].extend(overbound_rectangles)
+				else:
+					overbound_rectangles_by_y[siblings_y_value] = overbound_rectangles
 
 		# finished plotting the current sets of siblings
 		# set the next ones to plot
@@ -943,7 +1053,13 @@ def plot_pfg_tree(tree,
 	# Create the hover-over
 	hover_text = PFGHoverText(ax)
 
-	ax.set_title("OpenMP Parallel FlameGraph")
+	title_text = "OpenMP Parallel FlameGraph"
+	if tracefile_name_one is not None and tracefile_name_two is not None:
+		title_text += "\n" + tracefile_name_one.split("/")[-1] + " (reference: " + tracefile_name_two.split("/")[-1] + ")"
+	elif tracefile_name_one is not None:
+		title_text += "\n" + tracefile_name_one.split("/")[-1]
+
+	ax.set_title(title_text)
 
 	x_tick_positions = [0]
 	x_tick_labels = [sizeof_fmt(0,suffix="")]
@@ -971,5 +1087,9 @@ def plot_pfg_tree(tree,
 
 		logging.info("Saving plot to %s.", output_file)
 		fig.savefig(output_file, format="png", dpi=400, bbox_inches="tight")
+
+	# This doesn't work without context, and if I provide context it's just the original parallel flame graph
+	#plot_differential(overbound_rectangles_by_y, extension_rectangles_by_y)
+
 
 

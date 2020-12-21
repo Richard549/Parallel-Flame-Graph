@@ -2,7 +2,7 @@ from argparse import ArgumentParser, ArgumentTypeError
 from collections import defaultdict
 import logging
 
-from PfgTree import PFGTree, TransformationOption, ColourMode, calculate_nodes_differential, generate_exclusive_parallelism_intervals, generate_inclusive_event_counts
+from PfgTree import PFGTree, TransformationOption, ColourMode
 from PfgTracefile import process_events, count_function_calls
 from PfgPlotting import plot_pfg_tree, HeightDisplayOption
 from PfgUtil import initialise_logging, debug_mode, LogLevelOption
@@ -43,10 +43,11 @@ def run_pfg(
 	elif transformation == TransformationOption.MERGE_CALLS_ACROSS_CPUS:
 		logging.info("Transforming tree to aggregate sibling function calls executed on different CPUs.")	
 		tree.transform_tree_aggregate_siblings_across_cpus()
+		tree.generate_exclusive_cpu_times(tree.root_nodes)
 		if inclusive:
-			generate_inclusive_event_counts(tree.root_nodes, counters)
+			tree.generate_inclusive_event_counts(tree.root_nodes, counters)
 		else:
-			generate_exclusive_parallelism_intervals(tree.root_nodes)
+			tree.generate_exclusive_parallelism_intervals(tree.root_nodes)
 	elif transformation == TransformationOption.VERTICAL_STACK_CPU:
 		logging.info("Transforming tree to stack CPU entities vertically.")	
 		tree.transform_tree_stack_cpu_vertically()
@@ -72,7 +73,8 @@ def run_pfg(
 		height_display_option,
 		output_file,
 		x_bounds,
-		counters)
+		counters,
+		tracefile)
 
 def run_pfg_differential(
 		tracefile_tar,
@@ -134,10 +136,11 @@ def run_pfg_differential(
 		elif transformation == TransformationOption.MERGE_CALLS_ACROSS_CPUS:
 			logging.info("Transforming %s tree to aggregate sibling function calls executed on different CPUs.", id_str)
 			tree.transform_tree_aggregate_siblings_across_cpus()
+			tree.generate_exclusive_cpu_times(tree.root_nodes)
 			if inclusive:
-				generate_inclusive_event_counts(tree.root_nodes, counters)
+				tree.generate_inclusive_event_counts(tree.root_nodes, counters)
 			else:
-				generate_exclusive_parallelism_intervals(tree.root_nodes)
+				tree.generate_exclusive_parallelism_intervals(tree.root_nodes)
 		elif transformation == TransformationOption.VERTICAL_STACK_CPU:
 			logging.info("Transforming %s tree to stack CPU entities vertically.", id_str)	
 			tree.transform_tree_stack_cpu_vertically()
@@ -160,7 +163,7 @@ def run_pfg_differential(
 			target_tree = tree
 
 	# So I have the two trees, transform one with respect to the other
-	calculate_nodes_differential(reference_tree.root_nodes, target_tree.root_nodes, counters_overall)
+	reference_tree.calculate_nodes_differential_version2(reference_tree.root_nodes, target_tree.root_nodes, counters_overall)
 
 	# Because I have calculated differential event values, I need to recalibrate the colour mappings
 	reference_tree.assign_colour_indexes_to_nodes(reference_tree.root_nodes, len(cpus_overall))
@@ -174,7 +177,9 @@ def run_pfg_differential(
 		height_display_option,
 		output_file,
 		x_bounds,
-		counters_overall)
+		counters_overall,
+		tracefile_tar,
+		tracefile_ref)
 
 def transformation_option(input_string):
 	transform_option_int = 0
